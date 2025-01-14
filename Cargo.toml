@@ -1,0 +1,48 @@
+[package]
+name = "vuefinder"
+version = "0.1.0"
+edition = "2021"
+authors = ["boenfu"]
+description = "A Rust implementation of VueFinder file manager"
+
+[dependencies]
+# Web 框架
+actix-web = "4.4"
+actix-multipart = "0.6"
+
+# 序列化/反序列化
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# 异步运行时
+tokio = { version = "1.0", features = ["full"] }
+
+# 文件系统操作
+tokio-util = { version = "0.7", features = ["io"] }
+futures-util = "0.3"
+async-stream = "0.3"
+
+# 压缩文件支持
+zip = "0.6"
+
+# 错误处理
+thiserror = "1.0"
+anyhow = "1.0"
+
+# 日志
+log = "0.4"
+env_logger = "0.10"
+
+# MIME 类型检测
+mime_guess = "2.0"
+
+# 文件系统抽象
+async-trait = "0.1"
+
+# CORS 支持
+actix-cors = "0.6"
+
+[dev-dependencies]
+# 测试工具
+tokio-test = "0.4"
+tempfile = "3.8" 
