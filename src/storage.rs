@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use mime_guess::from_path;
+use std::io::ErrorKind;
 
 #[derive(Error, Debug)]
 pub enum StorageError {
@@ -23,8 +25,8 @@ pub struct StorageFile {
 }
 
 #[async_trait]
-pub trait StorageAdapter: Send + Sync {
-    async fn list_contents(&self, path: &str) -> Result<Vec<StorageFile>, StorageError>;
+pub trait StorageAdapter {
+    async fn list_contents(&self, path: &str) -> Result<Vec<StorageItem>, Box<dyn std::error::Error>>;
     async fn read(&self, path: &str) -> Result<Vec<u8>, StorageError>;
     async fn write(&self, path: &str, contents: Vec<u8>) -> Result<(), StorageError>;
     async fn delete(&self, path: &str) -> Result<(), StorageError>;
@@ -32,20 +34,30 @@ pub trait StorageAdapter: Send + Sync {
     async fn exists(&self, path: &str) -> Result<bool, StorageError>;
 }
 
+#[derive(Debug, Serialize)]
+pub struct StorageItem {
+    pub node_type: String,
+    pub path: String,
+    pub basename: String,
+    pub extension: Option<String>,
+    pub mime_type: Option<String>,
+}
+
 pub struct LocalStorage {
-    root: PathBuf,
+    root: String,
 }
 
 impl LocalStorage {
-    pub fn new<P: AsRef<Path>>(root: P) -> Self {
+    pub fn new(root: &str) -> Self {
         Self {
-            root: root.as_ref().to_path_buf(),
+            root: root.to_string(),
         }
     }
 
+    // 解析并验证路径
     fn resolve_path(&self, path: &str) -> Result<PathBuf, StorageError> {
         let clean_path = path.trim_start_matches("local://");
-        let full_path = self.root.join(clean_path);
+        let full_path = PathBuf::from(&self.root).join(clean_path);
         
         // 安全检查：确保路径在 root 目录下
         if !full_path.starts_with(&self.root) {
@@ -58,31 +70,49 @@ impl LocalStorage {
 
 #[async_trait]
 impl StorageAdapter for LocalStorage {
-    async fn list_contents(&self, path: &str) -> Result<Vec<StorageFile>, StorageError> {
+    async fn list_contents(&self, path: &str) -> Result<Vec<StorageItem>, Box<dyn std::error::Error>> {
         let full_path = self.resolve_path(path)?;
         let mut entries = Vec::new();
         
         let mut read_dir = fs::read_dir(&full_path).await?;
         while let Some(entry) = read_dir.next_entry().await? {
             let metadata = entry.metadata().await?;
-            let file_type = if metadata.is_dir() { "dir" } else { "file" };
-            
-            let path = entry
-                .path()
+            let path_buf = entry.path();
+            let relative_path = path_buf
                 .strip_prefix(&self.root)
                 .unwrap()
                 .to_string_lossy()
                 .into_owned();
+                
+            let basename = path_buf
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+                
+            let extension = path_buf
+                .extension()
+                .map(|ext| ext.to_string_lossy().into_owned());
+                
+            let mime_type = if metadata.is_file() {
+                Some(from_path(&path_buf)
+                    .first_or_octet_stream()
+                    .essence_str()
+                    .to_owned())
+            } else {
+                None
+            };
 
-            entries.push(StorageFile {
-                path,
-                file_type: file_type.to_string(),
-                size: metadata.len(),
-                last_modified: metadata.modified().ok().map(|t| {
-                    t.duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs()
-                }),
+            entries.push(StorageItem {
+                node_type: if metadata.is_dir() { 
+                    "dir".to_string() 
+                } else { 
+                    "file".to_string() 
+                },
+                path: relative_path,
+                basename,
+                extension,
+                mime_type,
             });
         }
         
@@ -91,7 +121,13 @@ impl StorageAdapter for LocalStorage {
 
     async fn read(&self, path: &str) -> Result<Vec<u8>, StorageError> {
         let full_path = self.resolve_path(path)?;
-        Ok(fs::read(&full_path).await?)
+        match fs::read(&full_path).await {
+            Ok(contents) => Ok(contents),
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                Err(StorageError::NotFound(path.to_string()))
+            }
+            Err(e) => Err(StorageError::Io(e)),
+        }
     }
 
     async fn write(&self, path: &str, contents: Vec<u8>) -> Result<(), StorageError> {
@@ -108,21 +144,31 @@ impl StorageAdapter for LocalStorage {
 
     async fn delete(&self, path: &str) -> Result<(), StorageError> {
         let full_path = self.resolve_path(path)?;
-        let metadata = fs::metadata(&full_path).await?;
         
-        if metadata.is_dir() {
-            fs::remove_dir_all(&full_path).await?;
-        } else {
-            fs::remove_file(&full_path).await?;
+        match fs::metadata(&full_path).await {
+            Ok(metadata) => {
+                if metadata.is_dir() {
+                    fs::remove_dir_all(&full_path).await?;
+                } else {
+                    fs::remove_file(&full_path).await?;
+                }
+                Ok(())
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                Err(StorageError::NotFound(path.to_string()))
+            }
+            Err(e) => Err(StorageError::Io(e)),
         }
-        
-        Ok(())
     }
 
     async fn create_dir(&self, path: &str) -> Result<(), StorageError> {
         let full_path = self.resolve_path(path)?;
-        fs::create_dir_all(&full_path).await?;
-        Ok(())
+        
+        match fs::create_dir_all(&full_path).await {
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(()),
+            Err(e) => Err(StorageError::Io(e)),
+        }
     }
 
     async fn exists(&self, path: &str) -> Result<bool, StorageError> {
@@ -139,7 +185,7 @@ mod tests {
     #[tokio::test]
     async fn test_local_storage() {
         let temp_dir = TempDir::new().unwrap();
-        let storage = LocalStorage::new(temp_dir.path());
+        let storage = LocalStorage::new(temp_dir.path().to_str().unwrap());
 
         // 测试创建目录
         storage.create_dir("test_dir").await.unwrap();
@@ -157,10 +203,32 @@ mod tests {
         let entries = storage.list_contents("test_dir").await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].path, "test_dir/test.txt");
-        assert_eq!(entries[0].file_type, "file");
+        assert_eq!(entries[0].node_type, "file");
+        assert_eq!(entries[0].extension.as_deref(), Some("txt"));
+        assert_eq!(entries[0].mime_type.as_deref(), Some("text/plain"));
 
         // 测试删除
         storage.delete("test_dir/test.txt").await.unwrap();
         assert!(!storage.exists("test_dir/test.txt").await.unwrap());
+
+        // 测试删除目录
+        storage.delete("test_dir").await.unwrap();
+        assert!(!storage.exists("test_dir").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_invalid_paths() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = LocalStorage::new(temp_dir.path().to_str().unwrap());
+
+        // 测试路径穿越攻击
+        assert!(storage.read("../outside.txt").await.is_err());
+        assert!(storage.write("../outside.txt", vec![]).await.is_err());
+        
+        // 测试不存在的文件
+        assert!(matches!(
+            storage.read("nonexistent.txt").await,
+            Err(StorageError::NotFound(_))
+        ));
     }
 } 
