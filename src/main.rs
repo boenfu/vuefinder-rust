@@ -1,14 +1,12 @@
 use actix_cors::Cors;
 use actix_multipart::Multipart;
-use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{web, App, HttpResponse, HttpServer};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::sync::Arc;
-use actix_multipart::Field;
 use futures_util::TryStreamExt;
 use serde_json::json;
 use std::io::Write;
-use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
 use std::io::Cursor;
 use zip::{ZipWriter, write::FileOptions};
 use actix_web::middleware::Logger;
@@ -124,7 +122,7 @@ impl VueFinder {
     pub async fn index(
         data: web::Data<VueFinder>,
         query: web::Query<IndexQuery>,
-    ) -> impl Responder {
+    ) -> HttpResponse {
         let adapter = query.adapter.clone().unwrap_or_else(|| {
             data.storages
                 .keys()
@@ -156,7 +154,7 @@ impl VueFinder {
         };
 
         // 转换为 FileNode
-        let mut files: Vec<FileNode> = list_contents.into_iter()
+        let files: Vec<FileNode> = list_contents.into_iter()
             .map(|item| {
                 let mut node = FileNode {
                     node_type: item.node_type,
@@ -183,7 +181,7 @@ impl VueFinder {
     pub async fn subfolders(
         data: web::Data<VueFinder>,
         query: web::Query<PathQuery>,
-    ) -> impl Responder {
+    ) -> HttpResponse {
         let adapter = query.adapter.clone().unwrap_or_else(|| {
             data.storages
                 .keys()
@@ -225,7 +223,7 @@ impl VueFinder {
     pub async fn download(
         data: web::Data<VueFinder>,
         query: web::Query<PathQuery>,
-    ) -> impl Responder {
+    ) -> HttpResponse {
         let storage = match data.storages.get(&query.adapter.clone().unwrap_or_default()) {
             Some(s) => s,
             None => return HttpResponse::BadRequest().finish()
@@ -256,7 +254,7 @@ impl VueFinder {
     pub async fn preview(
         data: web::Data<VueFinder>,
         query: web::Query<PathQuery>,
-    ) -> impl Responder {
+    ) -> HttpResponse {
         let storage = match data.storages.get(&query.adapter.clone().unwrap_or_default()) {
             Some(s) => s,
             None => return HttpResponse::BadRequest().finish()
@@ -278,7 +276,7 @@ impl VueFinder {
     pub async fn search(
         data: web::Data<VueFinder>,
         query: web::Query<SearchQuery>,
-    ) -> impl Responder {
+    ) -> HttpResponse {
         let adapter = query.adapter.clone().unwrap_or_default();
         let storage = match data.storages.get(&adapter) {
             Some(s) => s,
@@ -311,7 +309,7 @@ impl VueFinder {
         data: web::Data<VueFinder>,
         query: web::Query<PathQuery>,
         payload: web::Json<NewFolderRequest>,
-    ) -> impl Responder {
+    ) -> HttpResponse {
         let storage = match data.storages.get(&query.adapter.clone().unwrap_or_default()) {
             Some(s) => s,
             None => return HttpResponse::BadRequest().finish()
@@ -332,7 +330,7 @@ impl VueFinder {
         data: web::Data<VueFinder>,
         query: web::Query<PathQuery>,
         payload: web::Json<NewFileRequest>,
-    ) -> impl Responder {
+    ) -> HttpResponse {
         let storage = match data.storages.get(&query.adapter.clone().unwrap_or_default()) {
             Some(s) => s,
             None => return HttpResponse::BadRequest().finish()
@@ -353,7 +351,7 @@ impl VueFinder {
         data: web::Data<VueFinder>,
         query: web::Query<PathQuery>,
         payload: web::Json<RenameRequest>,
-    ) -> impl Responder {
+    ) -> HttpResponse {
         let storage = match data.storages.get(&query.adapter.clone().unwrap_or_default()) {
             Some(s) => s,
             None => return HttpResponse::BadRequest().finish()
@@ -391,7 +389,7 @@ impl VueFinder {
         data: web::Data<VueFinder>,
         query: web::Query<PathQuery>,
         payload: web::Json<MoveRequest>,
-    ) -> impl Responder {
+    ) -> HttpResponse {
         let storage = match data.storages.get(&query.adapter.clone().unwrap_or_default()) {
             Some(s) => s,
             None => return HttpResponse::BadRequest().finish()
@@ -444,7 +442,7 @@ impl VueFinder {
         data: web::Data<VueFinder>,
         query: web::Query<PathQuery>,
         payload: web::Json<DeleteRequest>,
-    ) -> impl Responder {
+    ) -> HttpResponse {
         let storage = match data.storages.get(&query.adapter.clone().unwrap_or_default()) {
             Some(s) => s,
             None => return HttpResponse::BadRequest().finish()
@@ -466,7 +464,7 @@ impl VueFinder {
         data: web::Data<VueFinder>,
         query: web::Query<PathQuery>,
         mut payload: Multipart,
-    ) -> impl Responder {
+    ) -> HttpResponse {
         let storage = match data.storages.get(&query.adapter.clone().unwrap_or_default()) {
             Some(s) => s,
             None => return HttpResponse::BadRequest().finish()
@@ -499,7 +497,7 @@ impl VueFinder {
         data: web::Data<VueFinder>,
         query: web::Query<PathQuery>,
         payload: web::Json<ArchiveRequest>,
-    ) -> impl Responder {
+    ) -> HttpResponse {
         let storage = match data.storages.get(&query.adapter.clone().unwrap_or_default()) {
             Some(s) => s,
             None => return HttpResponse::BadRequest().finish()
@@ -553,7 +551,7 @@ impl VueFinder {
         data: web::Data<VueFinder>,
         query: web::Query<PathQuery>,
         payload: web::Json<UnarchiveRequest>,
-    ) -> impl Responder {
+    ) -> HttpResponse {
         let storage = match data.storages.get(&query.adapter.clone().unwrap_or_default()) {
             Some(s) => s,
             None => return HttpResponse::BadRequest().finish()
@@ -599,7 +597,7 @@ impl VueFinder {
         data: web::Data<VueFinder>,
         query: web::Query<PathQuery>,
         payload: web::Json<SaveRequest>,
-    ) -> impl Responder {
+    ) -> HttpResponse {
         let storage = match data.storages.get(&query.adapter.clone().unwrap_or_default()) {
             Some(s) => s,
             None => return HttpResponse::BadRequest().finish()
