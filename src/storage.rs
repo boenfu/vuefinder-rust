@@ -48,6 +48,8 @@ pub struct StorageItem {
     pub last_modified: Option<u64>,
 }
 
+const LOCAL_SCHEME: &str = "local://";
+
 #[derive(Debug)]
 pub struct LocalStorage {
     root: String,
@@ -62,7 +64,7 @@ impl LocalStorage {
 
     // 解析并验证路径
     fn resolve_path(&self, path: &str) -> Result<PathBuf, StorageError> {
-        let clean_path = path.trim_start_matches("local://");
+        let clean_path = path.trim_start_matches(LOCAL_SCHEME);
         let full_path = PathBuf::from(&self.root).join(clean_path);
 
         // 安全检查：确保路径在 root 目录下
@@ -129,7 +131,7 @@ impl StorageAdapter for LocalStorage {
                 } else {
                     "file".to_string()
                 },
-                path: relative_path,
+                path: format!("{}{}", LOCAL_SCHEME, relative_path),
                 basename,
                 extension,
                 mime_type,
