@@ -334,7 +334,7 @@ impl VueFinder {
         };
 
         let new_path = format!(
-            "{}/{}",
+            "{}{}",
             query.path.clone().unwrap_or_default(),
             payload.name
         );
