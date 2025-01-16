@@ -3,6 +3,7 @@ use mime_guess::from_path;
 use serde::{Deserialize, Serialize};
 use std::io::ErrorKind;
 use std::path::PathBuf;
+use std::time::SystemTime;
 use thiserror::Error;
 use tokio::fs;
 
@@ -44,6 +45,7 @@ pub struct StorageItem {
     pub basename: String,
     pub extension: Option<String>,
     pub mime_type: Option<String>,
+    pub last_modified: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -113,6 +115,14 @@ impl StorageAdapter for LocalStorage {
                 None
             };
 
+            let last_modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
+
+            println!("Last modified: {:?}", last_modified);
+
             entries.push(StorageItem {
                 node_type: if metadata.is_dir() {
                     "dir".to_string()
@@ -123,6 +133,7 @@ impl StorageAdapter for LocalStorage {
                 basename,
                 extension,
                 mime_type,
+                last_modified,
             });
         }
 

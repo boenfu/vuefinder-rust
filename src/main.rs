@@ -113,7 +113,7 @@ impl VueFinder {
                 return adapter;
             }
         }
-        
+
         // 返回第一个可用的 adapter
         self.storages.keys().next().cloned().unwrap_or_default()
     }
@@ -333,11 +333,7 @@ impl VueFinder {
             None => return HttpResponse::BadRequest().finish(),
         };
 
-        let new_path = format!(
-            "{}{}",
-            query.path.clone().unwrap_or_default(),
-            payload.name
-        );
+        let new_path = format!("{}{}", query.path.clone().unwrap_or_default(), payload.name);
 
         match storage.create_dir(&new_path).await {
             Ok(_) => Self::index(data, query).await,
