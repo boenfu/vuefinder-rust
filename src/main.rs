@@ -573,53 +573,86 @@ impl VueFinder {
     pub async fn archive(
         data: web::Data<VueFinder>,
         query: web::Query<FinderQuery>,
-        _payload: web::Json<ArchiveRequest>,
+        payload: web::Json<ArchiveRequest>,
     ) -> HttpResponse {
-        // let storage = match data.storages.get(&query.adapter.clone().unwrap_or_default()) {
-        //     Some(s) => s,
-        //     None => return HttpResponse::BadRequest().finish()
-        // };
+        let storage = match data
+            .storages
+            .get(&query.adapter.clone().unwrap_or_default())
+        {
+            Some(s) => s,
+            None => return HttpResponse::BadRequest().finish(),
+        };
 
-        // let zip_path = format!("{}/{}.zip", query.path, payload.name);
+        let zip_path = format!(
+            "{}/{}.zip",
+            query.path.clone().unwrap_or_default(),
+            payload.name
+        );
 
-        // // 检查文件是否已存在
-        // if storage.exists(&zip_path).await.unwrap_or(false) {
-        //     return HttpResponse::BadRequest().json(json!({
-        //         "status": false,
-        //         "message": "The archive already exists. Try another name."
-        //     }));
-        // }
+        // 检查文件是否已存在
+        if storage.exists(&zip_path).await.unwrap_or(false) {
+            return HttpResponse::BadRequest().json(json!({
+                "status": false,
+                "message": "压缩文件已存在，请使用其他名称。"
+            }));
+        }
 
-        // // 创建 ZIP 文件
-        // let mut zip_buffer = Vec::new();
-        // let mut zip = ZipWriter::new(Cursor::new(&mut zip_buffer));
-        // let options = FileOptions::default()
-        //     .compression_method(zip::CompressionMethod::Deflated)
-        //     .unix_permissions(0o755);
+        // 创建 ZIP 文件
+        let mut zip_buffer = Vec::new();
+        {
+            let cursor = Cursor::new(&mut zip_buffer);
+            let mut zip = ZipWriter::new(cursor);
 
-        // for item in &payload.items {
-        //     match storage.read(&item.path).await {
-        //         Ok(contents) => {
-        //             let relative_path = item.path.trim_start_matches(&query.path).trim_start_matches('/');
-        //             zip.start_file(relative_path, options)?;
-        //             zip.write_all(&contents)?;
-        //         }
-        //         Err(e) => return HttpResponse::InternalServerError().json(json!({
-        //             "status": false,
-        //             "message": e.to_string()
-        //         }))
-        //     }
-        // }
+            let options = FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated)
+                .unix_permissions(0o755);
 
-        // zip.finish()?;
+            for item in &payload.items {
+                match storage.read(&item.path).await {
+                    Ok(contents) => {
+                        let file_name = Path::new(&item.path)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or_default();
 
-        // // 保存 ZIP 文件
-        // if let Err(e) = storage.write(&zip_path, zip_buffer).await {
-        //     return HttpResponse::InternalServerError().json(json!({
-        //         "status": false,
-        //         "message": e.to_string()
-        //     }));
-        // }
+                        if let Err(e) = zip.start_file(file_name, options) {
+                            return HttpResponse::InternalServerError().json(json!({
+                                "status": false,
+                                "message": format!("添加文件到ZIP失败: {}", e)
+                            }));
+                        }
+
+                        if let Err(e) = zip.write_all(&contents) {
+                            return HttpResponse::InternalServerError().json(json!({
+                                "status": false,
+                                "message": format!("写入文件内容失败: {}", e)
+                            }));
+                        }
+                    }
+                    Err(e) => {
+                        return HttpResponse::InternalServerError().json(json!({
+                            "status": false,
+                            "message": format!("读取源文件失败: {}", e)
+                        }));
+                    }
+                }
+            }
+
+            if let Err(e) = zip.finish() {
+                return HttpResponse::InternalServerError().json(json!({
+                    "status": false,
+                    "message": format!("完成ZIP文件失败: {}", e)
+                }));
+            }
+        }
+
+        // 保存 ZIP 文件
+        if let Err(e) = storage.write(&zip_path, zip_buffer).await {
+            return HttpResponse::InternalServerError().json(json!({
+                "status": false,
+                "message": format!("保存ZIP文件失败: {}", e)
+            }));
+        }
 
         Self::index(data, query).await
     }
@@ -627,45 +660,107 @@ impl VueFinder {
     pub async fn unarchive(
         data: web::Data<VueFinder>,
         query: web::Query<FinderQuery>,
-        _payload: web::Json<UnarchiveRequest>,
+        payload: web::Json<UnarchiveRequest>,
     ) -> HttpResponse {
-        // let storage = match data.storages.get(&query.adapter.clone().unwrap_or_default()) {
-        //     Some(s) => s,
-        //     None => return HttpResponse::BadRequest().finish()
-        // };
+        let storage = match data
+            .storages
+            .get(&query.adapter.clone().unwrap_or_default())
+        {
+            Some(s) => s,
+            None => return HttpResponse::BadRequest().finish(),
+        };
 
-        // // 读取 ZIP 文件
-        // let zip_contents = match storage.read(&payload.item).await {
-        //     Ok(contents) => contents,
-        //     Err(e) => return HttpResponse::InternalServerError().json(json!({
-        //         "status": false,
-        //         "message": e.to_string()
-        //     }))
-        // };
+        // 读取 ZIP 文件
+        let zip_contents = match storage.read(&payload.item).await {
+            Ok(contents) => contents,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(json!({
+                    "status": false,
+                    "message": format!("读取ZIP文件失败: {}", e)
+                }));
+            }
+        };
 
-        // let cursor = Cursor::new(zip_contents);
-        // let mut archive = zip::ZipArchive::new(cursor)?;
+        let cursor = Cursor::new(zip_contents);
+        let mut archive = match zip::ZipArchive::new(cursor) {
+            Ok(archive) => archive,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(json!({
+                    "status": false,
+                    "message": format!("打开ZIP文件失败: {}", e)
+                }));
+            }
+        };
 
-        // // 解压文件
-        // let extract_path = format!("{}/{}", query.path,
-        //     Path::new(&payload.item).file_stem().unwrap_or_default().to_str().unwrap());
+        // 解压文件
+        let extract_path = format!(
+            "{}/{}",
+            query.path.clone().unwrap_or_default(),
+            Path::new(&payload.item)
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+        );
 
-        // for i in 0..archive.len() {
-        //     let mut file = archive.by_index(i)?;
-        //     let outpath = format!("{}/{}", extract_path, file.name());
+        // 创建解压目标目录
+        if let Err(e) = storage.create_dir(&extract_path).await {
+            return HttpResponse::InternalServerError().json(json!({
+                "status": false,
+                "message": format!("创建解压目录失败: {}", e)
+            }));
+        }
 
-        //     if file.name().ends_with('/') {
-        //         storage.create_dir(&outpath).await?;
-        //     } else {
-        //         if let Some(p) = Path::new(&outpath).parent() {
-        //             let parent_path = p.to_str().unwrap();
-        //             storage.create_dir(parent_path).await?;
-        //         }
-        //         let mut buffer = Vec::new();
-        //         std::io::copy(&mut file, &mut buffer)?;
-        //         storage.write(&outpath, buffer).await?;
-        //     }
-        // }
+        for i in 0..archive.len() {
+            let mut file = match archive.by_index(i) {
+                Ok(file) => file,
+                Err(e) => {
+                    return HttpResponse::InternalServerError().json(json!({
+                        "status": false,
+                        "message": format!("读取ZIP文件条目失败: {}", e)
+                    }));
+                }
+            };
+
+            let outpath = format!("{}/{}", extract_path, file.name());
+
+            if file.name().ends_with('/') {
+                // 创建目录
+                if let Err(e) = storage.create_dir(&outpath).await {
+                    return HttpResponse::InternalServerError().json(json!({
+                        "status": false,
+                        "message": format!("创建目录失败: {}", e)
+                    }));
+                }
+            } else {
+                // 确保父目录存在
+                if let Some(p) = Path::new(&outpath).parent() {
+                    if let Some(parent_path) = p.to_str() {
+                        if let Err(e) = storage.create_dir(parent_path).await {
+                            return HttpResponse::InternalServerError().json(json!({
+                                "status": false,
+                                "message": format!("创建父目录失败: {}", e)
+                            }));
+                        }
+                    }
+                }
+
+                // 读取并写入文件内容
+                let mut buffer = Vec::new();
+                if let Err(e) = std::io::copy(&mut file, &mut buffer) {
+                    return HttpResponse::InternalServerError().json(json!({
+                        "status": false,
+                        "message": format!("读取ZIP文件内容失败: {}", e)
+                    }));
+                }
+
+                if let Err(e) = storage.write(&outpath, buffer).await {
+                    return HttpResponse::InternalServerError().json(json!({
+                        "status": false,
+                        "message": format!("写入解压文件失败: {}", e)
+                    }));
+                }
+            }
+        }
 
         Self::index(data, query).await
     }
@@ -754,7 +849,6 @@ pub struct SaveRequest {
 #[derive(Deserialize)]
 pub struct FileItem {
     path: String,
-    r#type: String,
 }
 
 // 主函数
