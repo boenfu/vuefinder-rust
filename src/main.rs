@@ -13,7 +13,7 @@ use std::sync::Arc;
 use zip::{write::FileOptions, ZipWriter};
 
 mod storage;
-use storage::{LocalStorage, StorageAdapter};
+use storage::{LocalStorage, StorageAdapter, StorageItem};
 
 // 在文件开头添加新的 trait 定义
 pub trait StorageAdapterDebug: StorageAdapter + std::fmt::Debug + Send + Sync {}
@@ -94,13 +94,8 @@ impl Config {
 // 响应结构体
 #[derive(Debug, Serialize)]
 struct FileNode {
-    #[serde(rename = "type")]
-    node_type: String,
-    path: String,
-    basename: String,
-    extension: Option<String>,
-    storage: String,
-    mime_type: Option<String>,
+    #[serde(flatten)]
+    storage_item: StorageItem,
     url: Option<String>,
 }
 
@@ -120,10 +115,10 @@ impl VueFinder {
 
     fn set_public_links(&self, node: &mut FileNode) {
         if let Some(public_links) = &self.config.public_links {
-            if node.node_type != "dir" {
+            if node.storage_item.node_type != "dir" {
                 for (public_link, domain) in public_links {
-                    if node.path.starts_with(public_link) {
-                        node.url = Some(node.path.replace(public_link, domain));
+                    if node.storage_item.path.starts_with(public_link) {
+                        node.url = Some(node.storage_item.path.replace(public_link, domain));
                         break;
                     }
                 }
@@ -139,7 +134,7 @@ impl VueFinder {
         })
     }
 
-    pub async fn index(data: web::Data<VueFinder>, query: web::Query<ApiQuery>) -> HttpResponse {
+    pub async fn index(data: web::Data<VueFinder>, query: web::Query<FinderQuery>) -> HttpResponse {
         let adapter = data.get_default_adapter(query.adapter.clone());
         let dirname = query
             .path
@@ -172,12 +167,7 @@ impl VueFinder {
             .into_iter()
             .map(|item| {
                 let mut node = FileNode {
-                    node_type: item.node_type,
-                    path: item.path,
-                    basename: item.basename,
-                    extension: item.extension,
-                    storage: adapter.clone(),
-                    mime_type: item.mime_type,
+                    storage_item: item,
                     url: None,
                 };
                 data.set_public_links(&mut node);
@@ -195,7 +185,7 @@ impl VueFinder {
 
     pub async fn subfolders(
         data: web::Data<VueFinder>,
-        query: web::Query<ApiQuery>,
+        query: web::Query<FinderQuery>,
     ) -> HttpResponse {
         let adapter = data.get_default_adapter(query.adapter.clone());
         let dirname = query.path.clone().unwrap_or_default();
@@ -233,7 +223,10 @@ impl VueFinder {
         }
     }
 
-    pub async fn download(data: web::Data<VueFinder>, query: web::Query<ApiQuery>) -> HttpResponse {
+    pub async fn download(
+        data: web::Data<VueFinder>,
+        query: web::Query<FinderQuery>,
+    ) -> HttpResponse {
         let storage = match data
             .storages
             .get(&query.adapter.clone().unwrap_or_default())
@@ -264,7 +257,10 @@ impl VueFinder {
         }
     }
 
-    pub async fn preview(data: web::Data<VueFinder>, query: web::Query<ApiQuery>) -> HttpResponse {
+    pub async fn preview(
+        data: web::Data<VueFinder>,
+        query: web::Query<FinderQuery>,
+    ) -> HttpResponse {
         let storage = match data
             .storages
             .get(&query.adapter.clone().unwrap_or_default())
@@ -286,7 +282,10 @@ impl VueFinder {
         }
     }
 
-    pub async fn search(data: web::Data<VueFinder>, query: web::Query<ApiQuery>) -> HttpResponse {
+    pub async fn search(
+        data: web::Data<VueFinder>,
+        query: web::Query<FinderQuery>,
+    ) -> HttpResponse {
         let adapter = query.adapter.clone().unwrap_or_default();
         let storage = match data.storages.get(&adapter) {
             Some(s) => s,
@@ -322,7 +321,7 @@ impl VueFinder {
 
     pub async fn new_folder(
         data: web::Data<VueFinder>,
-        query: web::Query<ApiQuery>,
+        query: web::Query<FinderQuery>,
         payload: web::Json<NewFolderRequest>,
     ) -> HttpResponse {
         let storage = match data
@@ -350,7 +349,7 @@ impl VueFinder {
 
     pub async fn newfile(
         data: web::Data<VueFinder>,
-        query: web::Query<ApiQuery>,
+        query: web::Query<FinderQuery>,
         payload: web::Json<NewFileRequest>,
     ) -> HttpResponse {
         let storage = match data
@@ -378,7 +377,7 @@ impl VueFinder {
 
     pub async fn rename(
         data: web::Data<VueFinder>,
-        query: web::Query<ApiQuery>,
+        query: web::Query<FinderQuery>,
         payload: web::Json<RenameRequest>,
     ) -> HttpResponse {
         let storage = match data
@@ -423,7 +422,7 @@ impl VueFinder {
 
     pub async fn r#move(
         data: web::Data<VueFinder>,
-        query: web::Query<ApiQuery>,
+        query: web::Query<FinderQuery>,
         payload: web::Json<MoveRequest>,
     ) -> HttpResponse {
         let storage = match data
@@ -497,7 +496,7 @@ impl VueFinder {
 
     pub async fn delete(
         data: web::Data<VueFinder>,
-        query: web::Query<ApiQuery>,
+        query: web::Query<FinderQuery>,
         payload: web::Json<DeleteRequest>,
     ) -> HttpResponse {
         let storage = match data
@@ -522,7 +521,7 @@ impl VueFinder {
 
     pub async fn upload(
         data: web::Data<VueFinder>,
-        query: web::Query<ApiQuery>,
+        query: web::Query<FinderQuery>,
         mut payload: Multipart,
     ) -> HttpResponse {
         let storage = match data.get_storage(query.adapter.clone()) {
@@ -573,7 +572,7 @@ impl VueFinder {
 
     pub async fn archive(
         data: web::Data<VueFinder>,
-        query: web::Query<ApiQuery>,
+        query: web::Query<FinderQuery>,
         _payload: web::Json<ArchiveRequest>,
     ) -> HttpResponse {
         // let storage = match data.storages.get(&query.adapter.clone().unwrap_or_default()) {
@@ -627,7 +626,7 @@ impl VueFinder {
 
     pub async fn unarchive(
         data: web::Data<VueFinder>,
-        query: web::Query<ApiQuery>,
+        query: web::Query<FinderQuery>,
         _payload: web::Json<UnarchiveRequest>,
     ) -> HttpResponse {
         // let storage = match data.storages.get(&query.adapter.clone().unwrap_or_default()) {
@@ -673,7 +672,7 @@ impl VueFinder {
 
     pub async fn save(
         data: web::Data<VueFinder>,
-        query: web::Query<ApiQuery>,
+        query: web::Query<FinderQuery>,
         payload: web::Json<SaveRequest>,
     ) -> HttpResponse {
         let storage = match data
@@ -702,16 +701,11 @@ impl VueFinder {
 
 // 请求和响应结构体
 #[derive(Deserialize)]
-pub struct IndexQuery {
+pub struct FinderQuery {
+    q: String,
+    adapter: Option<String>,
     path: Option<String>,
-    adapter: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub struct SearchQuery {
-    path: String,
-    filter: String,
-    adapter: Option<String>,
+    filter: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -817,8 +811,8 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .wrap(Logger::default())
             .wrap(cors)
-            .app_data(web::JsonConfig::default().limit(100 * 1024 * 1024))  // 100MB JSON limit
-            .app_data(web::PayloadConfig::default().limit(100 * 1024 * 1024))  // 100MB payload limit
+            .app_data(web::JsonConfig::default().limit(100 * 1024 * 1024)) // 100MB JSON limit
+            .app_data(web::PayloadConfig::default().limit(100 * 1024 * 1024)) // 100MB payload limit
             .app_data(vue_finder.clone())
             .service(
                 web::scope("/api")
@@ -833,7 +827,7 @@ async fn main() -> std::io::Result<()> {
 
 async fn handle_get(
     data: web::Data<VueFinder>,
-    query: web::Query<ApiQuery>,
+    query: web::Query<FinderQuery>,
 ) -> Result<HttpResponse, actix_web::Error> {
     match query.q.as_str() {
         "index" => Ok(VueFinder::index(data, query).await),
@@ -847,7 +841,7 @@ async fn handle_get(
 
 async fn handle_post(
     data: web::Data<VueFinder>,
-    query: web::Query<ApiQuery>,
+    query: web::Query<FinderQuery>,
     payload: web::Either<web::Json<serde_json::Value>, Multipart>,
 ) -> Result<HttpResponse, actix_web::Error> {
     match query.q.as_str() {
@@ -923,12 +917,4 @@ async fn handle_post(
         },
         _ => Ok(HttpResponse::BadRequest().finish()),
     }
-}
-
-#[derive(Deserialize)]
-pub struct ApiQuery {
-    q: String,
-    adapter: Option<String>,
-    path: Option<String>,
-    filter: Option<String>,
 }

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use mime_guess::from_path;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -15,14 +15,6 @@ pub enum StorageError {
     NotFound(String),
     #[error("Invalid path: {0}")]
     InvalidPath(String),
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct StorageFile {
-    pub path: String,
-    pub file_type: String,
-    pub size: u64,
-    pub last_modified: Option<u64>,
 }
 
 #[async_trait]
@@ -40,12 +32,15 @@ pub trait StorageAdapter {
 
 #[derive(Debug, Serialize)]
 pub struct StorageItem {
+    #[serde(rename = "type")]
     pub node_type: String,
     pub path: String,
     pub basename: String,
     pub extension: Option<String>,
     pub mime_type: Option<String>,
     pub last_modified: Option<u64>,
+    #[serde(rename = "file_size")]
+    pub size: Option<u64>,
 }
 
 const LOCAL_SCHEME: &str = "local://";
@@ -124,6 +119,12 @@ impl StorageAdapter for LocalStorage {
                 .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs());
 
+            let size = if metadata.is_file() {
+                Some(metadata.len())
+            } else {
+                None
+            };
+
             println!("Last modified: {:?}", last_modified);
 
             entries.push(StorageItem {
@@ -137,6 +138,7 @@ impl StorageAdapter for LocalStorage {
                 extension,
                 mime_type,
                 last_modified,
+                size,
             });
         }
 
