@@ -320,7 +320,7 @@ impl VueFinder {
         }
     }
 
-    pub async fn newfolder(
+    pub async fn new_folder(
         data: web::Data<VueFinder>,
         query: web::Query<ApiQuery>,
         payload: web::Json<NewFolderRequest>,
@@ -333,7 +333,7 @@ impl VueFinder {
             None => return HttpResponse::BadRequest().finish(),
         };
 
-        let new_path = format!("{}{}", query.path.clone().unwrap_or_default(), payload.name);
+        let new_path = format!("{}/{}", query.path.clone().unwrap_or_default(), payload.name);
 
         match storage.create_dir(&new_path).await {
             Ok(_) => Self::index(data, query).await,
@@ -833,7 +833,7 @@ async fn handle_post(
         "newfolder" => {
             let payload = serde_json::from_value(payload.into_inner())
                 .map_err(|e| actix_web::error::ErrorBadRequest(e))?;
-            Ok(VueFinder::newfolder(data, query, web::Json(payload)).await)
+            Ok(VueFinder::new_folder(data, query, web::Json(payload)).await)
         }
         "newfile" => {
             let payload = serde_json::from_value(payload.into_inner())
