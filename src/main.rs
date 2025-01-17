@@ -333,7 +333,11 @@ impl VueFinder {
             None => return HttpResponse::BadRequest().finish(),
         };
 
-        let new_path = format!("{}/{}", query.path.clone().unwrap_or_default(), payload.name);
+        let new_path = format!(
+            "{}/{}",
+            query.path.clone().unwrap_or_default(),
+            payload.name
+        );
 
         match storage.create_dir(&new_path).await {
             Ok(_) => Self::index(data, query).await,
@@ -521,32 +525,47 @@ impl VueFinder {
         query: web::Query<ApiQuery>,
         mut payload: Multipart,
     ) -> HttpResponse {
-        let storage = match data
-            .storages
-            .get(&query.adapter.clone().unwrap_or_default())
-        {
+        let storage = match data.get_storage(query.adapter.clone()) {
             Some(s) => s,
             None => return HttpResponse::BadRequest().finish(),
         };
 
+        let mut filename = String::new();
+        let mut file_data = Vec::new();
+
+        // 处理 multipart 表单字段
         while let Ok(Some(mut field)) = payload.try_next().await {
             let content_disposition = field.content_disposition();
-            let filename = content_disposition.get_filename().unwrap_or_default();
-            let filepath = format!("{}/{}", query.path.clone().unwrap_or_default(), filename);
 
-            // 读取文件内容
-            let mut bytes = Vec::new();
-            while let Ok(Some(chunk)) = field.try_next().await {
-                bytes.extend_from_slice(&chunk);
+            match content_disposition.get_name() {
+                Some("name") => {
+                    if let Ok(Some(chunk)) = field.try_next().await {
+                        filename = String::from_utf8_lossy(&chunk).to_string();
+                    }
+                }
+                Some("file") => {
+                    while let Ok(Some(chunk)) = field.try_next().await {
+                        file_data.extend_from_slice(&chunk);
+                    }
+                }
+                _ => continue,
             }
+        }
 
-            // 写入存储
-            if let Err(e) = storage.write(&filepath, bytes).await {
-                return HttpResponse::InternalServerError().json(json!({
-                    "status": false,
-                    "message": e.to_string()
-                }));
-            }
+        if filename.is_empty() || file_data.is_empty() {
+            return HttpResponse::BadRequest().json(json!({
+                "status": false,
+                "message": "Missing file or filename"
+            }));
+        }
+
+        // 构建文件路径并保存文件
+        let filepath = format!("{}/{}", query.path.clone().unwrap_or_default(), filename);
+        if let Err(e) = storage.write(&filepath, file_data).await {
+            return HttpResponse::InternalServerError().json(json!({
+                "status": false,
+                "message": e.to_string()
+            }));
         }
 
         Self::index(data, query).await
@@ -798,6 +817,8 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .wrap(Logger::default())
             .wrap(cors)
+            .app_data(web::JsonConfig::default().limit(100 * 1024 * 1024))  // 100MB JSON limit
+            .app_data(web::PayloadConfig::default().limit(100 * 1024 * 1024))  // 100MB payload limit
             .app_data(vue_finder.clone())
             .service(
                 web::scope("/api")
@@ -827,39 +848,79 @@ async fn handle_get(
 async fn handle_post(
     data: web::Data<VueFinder>,
     query: web::Query<ApiQuery>,
-    payload: web::Json<serde_json::Value>,
+    payload: web::Either<web::Json<serde_json::Value>, Multipart>,
 ) -> Result<HttpResponse, actix_web::Error> {
     match query.q.as_str() {
-        "newfolder" => {
-            let payload = serde_json::from_value(payload.into_inner())
-                .map_err(|e| actix_web::error::ErrorBadRequest(e))?;
-            Ok(VueFinder::new_folder(data, query, web::Json(payload)).await)
-        }
-        "newfile" => {
-            let payload = serde_json::from_value(payload.into_inner())
-                .map_err(|e| actix_web::error::ErrorBadRequest(e))?;
-            Ok(VueFinder::newfile(data, query, web::Json(payload)).await)
-        }
-        "rename" => {
-            let payload = serde_json::from_value(payload.into_inner())
-                .map_err(|e| actix_web::error::ErrorBadRequest(e))?;
-            Ok(VueFinder::rename(data, query, web::Json(payload)).await)
-        }
-        "move" => {
-            let payload = serde_json::from_value(payload.into_inner())
-                .map_err(|e| actix_web::error::ErrorBadRequest(e))?;
-            Ok(VueFinder::r#move(data, query, web::Json(payload)).await)
-        }
-        "delete" => {
-            let payload = serde_json::from_value(payload.into_inner())
-                .map_err(|e| actix_web::error::ErrorBadRequest(e))?;
-            Ok(VueFinder::delete(data, query, web::Json(payload)).await)
-        }
-        "save" => {
-            let payload = serde_json::from_value(payload.into_inner())
-                .map_err(|e| actix_web::error::ErrorBadRequest(e))?;
-            Ok(VueFinder::save(data, query, web::Json(payload)).await)
-        }
+        "upload" => match payload {
+            web::Either::Right(payload) => Ok(VueFinder::upload(data, query, payload).await),
+            _ => Err(actix_web::error::ErrorBadRequest(
+                "Upload requests should use multipart/form-data",
+            )),
+        },
+        "newfolder" => match payload {
+            web::Either::Left(json) => {
+                let payload = serde_json::from_value(json.into_inner())
+                    .map_err(|e| actix_web::error::ErrorBadRequest(e))?;
+                Ok(VueFinder::new_folder(data, query, web::Json(payload)).await)
+            }
+            _ => Err(actix_web::error::ErrorBadRequest("Expected JSON payload")),
+        },
+        "newfile" => match payload {
+            web::Either::Left(json) => {
+                let payload = serde_json::from_value(json.into_inner())
+                    .map_err(|e| actix_web::error::ErrorBadRequest(e))?;
+                Ok(VueFinder::newfile(data, query, web::Json(payload)).await)
+            }
+            _ => Err(actix_web::error::ErrorBadRequest("Expected JSON payload")),
+        },
+        "rename" => match payload {
+            web::Either::Left(json) => {
+                let payload = serde_json::from_value(json.into_inner())
+                    .map_err(|e| actix_web::error::ErrorBadRequest(e))?;
+                Ok(VueFinder::rename(data, query, web::Json(payload)).await)
+            }
+            _ => Err(actix_web::error::ErrorBadRequest("Expected JSON payload")),
+        },
+        "move" => match payload {
+            web::Either::Left(json) => {
+                let payload = serde_json::from_value(json.into_inner())
+                    .map_err(|e| actix_web::error::ErrorBadRequest(e))?;
+                Ok(VueFinder::r#move(data, query, web::Json(payload)).await)
+            }
+            _ => Err(actix_web::error::ErrorBadRequest("Expected JSON payload")),
+        },
+        "delete" => match payload {
+            web::Either::Left(json) => {
+                let payload = serde_json::from_value(json.into_inner())
+                    .map_err(|e| actix_web::error::ErrorBadRequest(e))?;
+                Ok(VueFinder::delete(data, query, web::Json(payload)).await)
+            }
+            _ => Err(actix_web::error::ErrorBadRequest("Expected JSON payload")),
+        },
+        "save" => match payload {
+            web::Either::Left(json) => {
+                let payload = serde_json::from_value(json.into_inner())
+                    .map_err(|e| actix_web::error::ErrorBadRequest(e))?;
+                Ok(VueFinder::save(data, query, web::Json(payload)).await)
+            }
+            _ => Err(actix_web::error::ErrorBadRequest("Expected JSON payload")),
+        },
+        "archive" => match payload {
+            web::Either::Left(json) => {
+                let payload = serde_json::from_value(json.into_inner())
+                    .map_err(|e| actix_web::error::ErrorBadRequest(e))?;
+                Ok(VueFinder::archive(data, query, web::Json(payload)).await)
+            }
+            _ => Err(actix_web::error::ErrorBadRequest("Expected JSON payload")),
+        },
+        "unarchive" => match payload {
+            web::Either::Left(json) => {
+                let payload = serde_json::from_value(json.into_inner())
+                    .map_err(|e| actix_web::error::ErrorBadRequest(e))?;
+                Ok(VueFinder::unarchive(data, query, web::Json(payload)).await)
+            }
+            _ => Err(actix_web::error::ErrorBadRequest("Expected JSON payload")),
+        },
         _ => Ok(HttpResponse::BadRequest().finish()),
     }
 }
