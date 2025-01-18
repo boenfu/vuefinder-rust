@@ -25,6 +25,10 @@ struct Args {
     /// Local storage path
     #[arg(short = 'l', long, default_value = "./storage")]
     local_storage: String,
+
+    /// Finder config file path
+    #[arg(short, long, default_value = "./vuefinder.json")]
+    config: String,
 }
 
 #[actix_web::main]
@@ -36,12 +40,11 @@ async fn main() -> std::io::Result<()> {
     // Ensure storage directory exists
     tokio::fs::create_dir_all(&args.local_storage).await?;
 
+    let config = VueFinderConfig::from_file(&args.config).unwrap_or_default();
+
     let app_config = VueFinderAppConfig {
         storages: LocalStorage::setup(&args.local_storage),
-        finder_config: Arc::new(
-            VueFinderConfig::from_file("config.json")
-                .unwrap_or_else(|_| VueFinderConfig { public_links: None }),
-        ),
+        finder_config: Arc::new(config),
         ..VueFinderAppConfig::default()
     };
 

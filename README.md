@@ -122,13 +122,33 @@ vue_finder.list_contents("path/to/dir").await?;
 
 ## Configuration
 
-Create a `config.json` file in your project root:
+VueFinder supports configuration through a JSON file. By default, it looks for `vuefinder.json` in the current directory.
+
+You can specify a custom config file path using the `-c` or `--config` option:
+```bash
+vuefinder --config /path/to/config.json
+```
+
+Example configuration file:
 ```json
 {
   "public_links": {
-    "downloads": "public/downloads"
+    "local://downloads": "https://vuefinder-rust.com/downloads"
   }
 }
+```
+
+### Command Line Options
+
+- `-p, --port <PORT>`: Specify server port [default: 8080]
+- `-b, --host <HOST>`: Specify binding address [default: 127.0.0.1]
+- `-l, --local-storage <PATH>`: Specify local storage path [default: ./storage]
+- `-c, --config <PATH>`: Specify configuration file path [default: ./vuefinder.json]
+
+```bash
+# Examples
+vuefinder --local-storage /path/to/storage --config /path/to/config.json
+vuefinder --host 0.0.0.0 --port 3000 --config custom-config.json
 ```
 
 ## Features
