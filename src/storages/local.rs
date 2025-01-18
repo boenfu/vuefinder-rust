@@ -1,8 +1,10 @@
 use super::{StorageAdapter, StorageError, StorageItem};
 use async_trait::async_trait;
 use mime_guess::from_path;
+use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::fs;
 
@@ -18,6 +20,13 @@ impl LocalStorage {
         Self {
             root: root.to_string(),
         }
+    }
+
+    pub fn setup(path: &str) -> Arc<HashMap<String, Arc<dyn StorageAdapter>>> {
+        let mut storages = HashMap::new();
+        let storage = Arc::new(Self::new(path)) as Arc<dyn StorageAdapter>;
+        storages.insert(storage.name(), storage);
+        Arc::new(storages)
     }
 
     // Parse and validate path

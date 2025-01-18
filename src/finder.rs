@@ -31,6 +31,12 @@ impl VueFinderConfig {
     }
 }
 
+impl Default for VueFinderConfig {
+    fn default() -> Self {
+        Self { public_links: None }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct FileNode {
     #[serde(flatten)]
