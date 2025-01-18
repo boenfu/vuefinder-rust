@@ -137,7 +137,7 @@ impl VueFinder {
         }))
     }
 
-    pub async fn subfolders(data: web::Data<VueFinder>, query: web::Query<Query>) -> HttpResponse {
+    pub async fn sub_folders(data: web::Data<VueFinder>, query: web::Query<Query>) -> HttpResponse {
         let adapter = data.get_default_adapter(query.adapter.clone());
         let dirname = query.path.clone().unwrap_or_default();
 
@@ -313,7 +313,7 @@ impl VueFinder {
         }
     }
 
-    pub async fn newfile(
+    pub async fn new_file(
         data: web::Data<VueFinder>,
         query: web::Query<Query>,
         payload: web::Json<NewFileRequest>,

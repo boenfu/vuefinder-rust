@@ -17,7 +17,7 @@ pub async fn finder_router(
     match *req.method() {
         actix_web::http::Method::GET => match query.q.as_str() {
             "index" => Ok(VueFinder::index(data, query).await),
-            "subfolders" => Ok(VueFinder::subfolders(data, query).await),
+            "subfolders" => Ok(VueFinder::sub_folders(data, query).await),
             "download" => Ok(VueFinder::download(data, query).await),
             "preview" => Ok(VueFinder::preview(data, query).await),
             "search" => Ok(VueFinder::search(data, query).await),
@@ -48,7 +48,7 @@ pub async fn finder_router(
                         "newfile" => {
                             let payload: NewFileRequest = serde_json::from_value(json.into_inner())
                                 .map_err(actix_web::error::ErrorBadRequest)?;
-                            Ok(VueFinder::newfile(data, query, web::Json(payload)).await)
+                            Ok(VueFinder::new_file(data, query, web::Json(payload)).await)
                         }
                         "rename" => {
                             let payload: RenameRequest = serde_json::from_value(json.into_inner())
