@@ -13,7 +13,7 @@ pub enum StorageError {
 }
 
 #[async_trait]
-pub trait StorageAdapter {
+pub trait StorageAdapter: Send + Sync {
     fn name(&self) -> String;
     async fn list_contents(
         &self,
