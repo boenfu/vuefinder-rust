@@ -1,6 +1,7 @@
 use actix_cors::Cors;
 use actix_web::middleware::Logger;
 use actix_web::{web, App, HttpServer};
+use clap::Parser;
 use env_logger::Env;
 use std::sync::Arc;
 
@@ -10,24 +11,34 @@ use vuefinder::{
     storages::{local::LocalStorage, StorageAdapter},
 };
 
+#[derive(Parser)]
+#[command(author, version, about)]
+struct Args {
+    /// Server listening port
+    #[arg(short, long, default_value = "8080")]
+    port: u16,
+
+    /// Server binding address
+    #[arg(short = 'b', long, default_value = "127.0.0.1")]
+    host: String,
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    let args = Args::parse();
+
     env_logger::init_from_env(Env::default().default_filter_or("info"));
 
     // Ensure storage directory exists
     let storage_path = "./storage";
     tokio::fs::create_dir_all(storage_path).await?;
 
-    let config = VueFinderConfig::from_file("config.json").unwrap_or_else(|_| VueFinderConfig {
-        public_links: None,
-        // cors: default_cors_config(),
-    });
+    let config = VueFinderConfig::from_file("config.json")
+        .unwrap_or_else(|_| VueFinderConfig { public_links: None });
 
     let mut storages = std::collections::HashMap::new();
-    storages.insert(
-        "local".to_string(),
-        Arc::new(LocalStorage::new(storage_path)) as Arc<dyn StorageAdapter>,
-    );
+    let local_storage = Arc::new(LocalStorage::new(storage_path)) as Arc<dyn StorageAdapter>;
+    storages.insert(local_storage.name(), local_storage);
 
     let vue_finder = web::Data::new(VueFinder {
         storages: Arc::new(storages),
@@ -49,7 +60,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(vue_finder.clone())
             .service(web::resource("/api").route(web::route().to(finder_router)))
     })
-    .bind("127.0.0.1:8080")?
+    .bind(format!("{}:{}", args.host, args.port))?
     .run()
     .await
 }

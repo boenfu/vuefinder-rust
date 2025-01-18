@@ -15,12 +15,21 @@ There are three ways to use VueFinder:
 
 Install and run VueFinder as a standalone server:
 ```bash
-# Install
-cargo install vuefinder --features binary
-# Run
+# Development
+cargo run
+cargo run -- --port 3000
+cargo run -- --host 0.0.0.0 --port 3000
+
+# Production
 vuefinder
+vuefinder --port 3000
+vuefinder --host 0.0.0.0 --port 3000
 ```
-The server will start at `http://localhost:8080` by default.
+
+The server will start at `http://localhost:8080` by default. You can customize the host and port using command line options:
+
+- `-p, --port <PORT>`: Specify server port [default: 8080]
+- `-b, --host <HOST>`: Specify binding address [default: 127.0.0.1]
 
 ### 2. As a Library with Router
 
