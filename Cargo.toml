@@ -1,48 +1,57 @@
 [package]
 name = "vuefinder"
 version = "0.1.0"
-edition = "2021"
 authors = ["boenfu"]
 description = "A Rust implementation of VueFinder file manager"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/boenfu/vuefinder"
+keywords = ["file-manager", "web", "vue"]
+categories = ["filesystem", "web-programming"]
+readme = "README.md"
+
+[lib]
+name = "vuefinder"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vuefinder"
+path = "src/main.rs"
+required-features = ["binary"]
+
+[features]
+default = []
+binary = []
 
 [dependencies]
-# Web 框架
-actix-web = "4.0"
+# HTTP & Web
+actix-web = { version = "4.0", features = ["macros"] }
 actix-multipart = "0.4"
+actix-cors = "0.6"
 
-# 序列化/反序列化
+# Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# 异步运行时
+# Async Runtime
 tokio = { version = "1.0", features = ["full"] }
-
-# 文件系统操作
 tokio-util = { version = "0.7", features = ["io"] }
 futures-util = "0.3"
 async-stream = "0.3"
+async-trait = "0.1"
 
-# 压缩文件支持
+# File Operations
 zip = "0.6"
+mime_guess = "2.0"
 
-# 错误处理
+# Error Handling
 thiserror = "1.0"
 anyhow = "1.0"
 
-# 日志
+# Logging
 log = "0.4"
 env_logger = "0.10"
 
-# MIME 类型检测
-mime_guess = "2.0"
-
-# 文件系统抽象
-async-trait = "0.1"
-
-# CORS 支持
-actix-cors = "0.6"
-
 [dev-dependencies]
-# 测试工具
 tokio-test = "0.4"
 tempfile = "3.8" 

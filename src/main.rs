@@ -4,17 +4,12 @@ use actix_web::{web, App, HttpServer};
 use env_logger::Env;
 use std::sync::Arc;
 
-mod finder;
-mod payload;
-mod storages;
+use vuefinder::{
+    finder::{VueFinder, VueFinderConfig},
+    router::finder_router,
+    storages::{local::LocalStorage, StorageAdapter},
+};
 
-pub mod router;
-
-use finder::{VueFinder, VueFinderConfig};
-use router::finder_router;
-use storages::{local::LocalStorage, StorageAdapter};
-
-// Main function
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::init_from_env(Env::default().default_filter_or("info"));
