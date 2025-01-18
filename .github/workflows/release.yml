@@ -11,6 +11,51 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
+        with:
+          fetch-depth: 0  # 获取完整的 git 历史记录
+
+      - name: Generate Changelog
+        id: changelog
+        run: |
+          # 获取当前标签和上一个标签
+          CURRENT_TAG=${GITHUB_REF#refs/tags/}
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 ${CURRENT_TAG}^ 2>/dev/null || echo "")
+          
+          # 生成提交记录的函数
+          generate_log() {
+            if [ -z "$PREVIOUS_TAG" ]; then
+              git log --pretty=format:"%h %s" ${CURRENT_TAG}
+            else
+              git log --pretty=format:"%h %s" ${PREVIOUS_TAG}..${CURRENT_TAG}
+            fi
+          }
+          
+          # 获取新特性
+          FEATURES=$(generate_log | grep "^[a-f0-9]* feat:" | sed 's/^\([a-f0-9]*\) feat: /* \1 🔋 feat: /')
+          
+          # 获取修复
+          FIXES=$(generate_log | grep "^[a-f0-9]* fix:" | sed 's/^\([a-f0-9]*\) fix: /* \1 🐛 fix: /')
+          
+          # 组合 changelog
+          CHANGELOG="## Changelog\n"
+          
+          if [ ! -z "$FEATURES" ]; then
+            CHANGELOG="${CHANGELOG}\n### New Features\n${FEATURES}\n"
+          fi
+          
+          if [ ! -z "$FIXES" ]; then
+            CHANGELOG="${CHANGELOG}\n### Bug Fixes\n${FIXES}\n"
+          fi
+          
+          # 如果没有任何变更，添加默认信息
+          if [ -z "$FEATURES" ] && [ -z "$FIXES" ]; then
+            CHANGELOG="${CHANGELOG}\n* No notable changes"
+          fi
+          
+          # 将 changelog 保存到环境变量中，处理多行字符串
+          echo "CHANGELOG<<EOF" >> $GITHUB_ENV
+          echo -e "$CHANGELOG" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
 
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
@@ -22,18 +67,13 @@ jobs:
       - name: Build
         run: cargo build --release
 
-      - name: Get commit messages
-        id: get_commit_messages
-        run: |
-          echo "COMMIT_MESSAGES<<EOF" >> $GITHUB_ENV
-          git log --format="- %s" ${GITHUB_REF}^..${GITHUB_REF} >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ github.ref }}
-          files: target/release/vuefinder # 替换为您的二进制文件路径
-          body: ${{ env.COMMIT_MESSAGES }}
+          body: |
+            Changes in this Release:
+            ${{ env.CHANGELOG }}
+          files: target/release/vuefinder
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
