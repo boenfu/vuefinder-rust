@@ -12,22 +12,20 @@ use std::path::Path;
 use std::sync::Arc;
 use zip::{write::FileOptions, ZipWriter};
 
-mod storage;
-use storage::{LocalStorage, StorageAdapter, StorageItem};
+mod storages;
+use storages::{local::LocalStorage, StorageAdapter, StorageItem};
 
-// 在文件开头添加新的 trait 定义
 pub trait StorageAdapterDebug: StorageAdapter + std::fmt::Debug + Send + Sync {}
 impl<T: StorageAdapter + std::fmt::Debug + Send + Sync> StorageAdapterDebug for T {}
 
-// 基础配置结构体
 #[derive(Clone, Debug)]
 pub struct VueFinder {
     storages: Arc<std::collections::HashMap<String, Arc<dyn StorageAdapterDebug>>>,
-    config: Arc<Config>,
+    config: Arc<VueFinderConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct Config {
+pub struct VueFinderConfig {
     public_links: Option<std::collections::HashMap<String, String>>,
     #[serde(default = "default_cors_config")]
     cors: CorsConfig,
@@ -45,7 +43,7 @@ pub struct CorsConfig {
     max_age: u32,
 }
 
-// 默认配置函数
+// Default configuration functions
 fn default_cors_config() -> CorsConfig {
     CorsConfig {
         allowed_origins: default_allowed_origins(),
@@ -83,15 +81,15 @@ fn default_max_age() -> u32 {
     3600
 }
 
-impl Config {
+impl VueFinderConfig {
     pub fn from_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path)?;
-        let config: Config = serde_json::from_str(&content)?;
+        let config: VueFinderConfig = serde_json::from_str(&content)?;
         Ok(config)
     }
 }
 
-// 响应结构体
+// Response struct
 #[derive(Debug, Serialize)]
 struct FileNode {
     #[serde(flatten)]
@@ -99,17 +97,17 @@ struct FileNode {
     url: Option<String>,
 }
 
-// 请求处理函数
+// Request handling functions
 impl VueFinder {
     fn get_default_adapter(&self, adapter: Option<String>) -> String {
-        // 如果 adapter 为空，返回第一个可用的 adapter
+        // If adapter is empty, return the first available adapter
         if let Some(adapter) = adapter {
             if self.storages.contains_key(&adapter) {
                 return adapter;
             }
         }
 
-        // 返回第一个可用的 adapter
+        // Return the first available adapter
         self.storages.keys().next().cloned().unwrap_or_default()
     }
 
@@ -129,7 +127,7 @@ impl VueFinder {
     fn get_storage(&self, adapter: Option<String>) -> Option<&Arc<dyn StorageAdapterDebug>> {
         let adapter = self.get_default_adapter(adapter);
         self.storages.get(&adapter).or_else(|| {
-            // 如果指定的 adapter 未找到，尝试获取第一个可用的 storage
+            // If the specified adapter is not found, try to get the first available storage
             self.storages.values().next()
         })
     }
@@ -141,7 +139,7 @@ impl VueFinder {
             .clone()
             .unwrap_or_else(|| format!("{}://", adapter));
 
-        // 获取目录内容
+        // Get directory contents
         let storage = match data.get_storage(query.adapter.clone()) {
             Some(s) => s,
             None => {
@@ -162,7 +160,7 @@ impl VueFinder {
             }
         };
 
-        // 转换为 FileNode
+        // Convert to FileNode
         let files: Vec<FileNode> = list_contents
             .into_iter()
             .map(|item| {
@@ -394,17 +392,17 @@ impl VueFinder {
             payload.name
         );
 
-        // 先读取原文件内容
+        // First read the original file content
         match storage.read(&payload.item).await {
             Ok(contents) => {
-                // 写入新文件
+                // Write the new file
                 if let Err(e) = storage.write(&new_path, contents).await {
                     return HttpResponse::InternalServerError().json(json!({
                         "status": false,
                         "message": e.to_string()
                     }));
                 }
-                // 删除原文件
+                // Delete the original file
                 if let Err(e) = storage.delete(&payload.item).await {
                     return HttpResponse::InternalServerError().json(json!({
                         "status": false,
@@ -433,7 +431,7 @@ impl VueFinder {
             None => return HttpResponse::BadRequest().finish(),
         };
 
-        // 检查目标路径是否存在冲突
+        // Check if the target path conflicts with existing files
         for item in &payload.items {
             let target = format!(
                 "{}/{}",
@@ -452,7 +450,7 @@ impl VueFinder {
             }
         }
 
-        // 执行移动操作
+        // Execute move operation
         for item in &payload.items {
             let target = format!(
                 "{}/{}",
@@ -464,17 +462,17 @@ impl VueFinder {
                     .unwrap()
             );
 
-            // 读取源文件内容
+            // Read source file content
             match storage.read(&item.path).await {
                 Ok(contents) => {
-                    // 写入目标位置
+                    // Write to target location
                     if let Err(e) = storage.write(&target, contents).await {
                         return HttpResponse::InternalServerError().json(json!({
                             "status": false,
                             "message": e.to_string()
                         }));
                     }
-                    // 删除源文件
+                    // Delete source file
                     if let Err(e) = storage.delete(&item.path).await {
                         return HttpResponse::InternalServerError().json(json!({
                             "status": false,
@@ -532,7 +530,7 @@ impl VueFinder {
         let mut filename = String::new();
         let mut file_data = Vec::new();
 
-        // 处理 multipart 表单字段
+        // Process multipart form fields
         while let Ok(Some(mut field)) = payload.try_next().await {
             let content_disposition = field.content_disposition();
 
@@ -558,7 +556,7 @@ impl VueFinder {
             }));
         }
 
-        // 构建文件路径并保存文件
+        // Build file path and save file
         let filepath = format!("{}/{}", query.path.clone().unwrap_or_default(), filename);
         if let Err(e) = storage.write(&filepath, file_data).await {
             return HttpResponse::InternalServerError().json(json!({
@@ -589,15 +587,15 @@ impl VueFinder {
             payload.name
         );
 
-        // 检查文件是否已存在
+        // Check if file already exists
         if storage.exists(&zip_path).await.unwrap_or(false) {
             return HttpResponse::BadRequest().json(json!({
                 "status": false,
-                "message": "压缩文件已存在，请使用其他名称。"
+                "message": "Zip file already exists. Please use a different name."
             }));
         }
 
-        // 创建 ZIP 文件
+        // Create ZIP file
         let mut zip_buffer = Vec::new();
         {
             let cursor = Cursor::new(&mut zip_buffer);
@@ -618,21 +616,21 @@ impl VueFinder {
                         if let Err(e) = zip.start_file(file_name, options) {
                             return HttpResponse::InternalServerError().json(json!({
                                 "status": false,
-                                "message": format!("添加文件到ZIP失败: {}", e)
+                                "message": format!("Failed to add file to ZIP: {}", e)
                             }));
                         }
 
                         if let Err(e) = zip.write_all(&contents) {
                             return HttpResponse::InternalServerError().json(json!({
                                 "status": false,
-                                "message": format!("写入文件内容失败: {}", e)
+                                "message": format!("Failed to write file content: {}", e)
                             }));
                         }
                     }
                     Err(e) => {
                         return HttpResponse::InternalServerError().json(json!({
                             "status": false,
-                            "message": format!("读取源文件失败: {}", e)
+                            "message": format!("Failed to read source file: {}", e)
                         }));
                     }
                 }
@@ -641,16 +639,16 @@ impl VueFinder {
             if let Err(e) = zip.finish() {
                 return HttpResponse::InternalServerError().json(json!({
                     "status": false,
-                    "message": format!("完成ZIP文件失败: {}", e)
+                    "message": format!("Failed to finalize ZIP file: {}", e)
                 }));
             }
         }
 
-        // 保存 ZIP 文件
+        // Save ZIP file
         if let Err(e) = storage.write(&zip_path, zip_buffer).await {
             return HttpResponse::InternalServerError().json(json!({
                 "status": false,
-                "message": format!("保存ZIP文件失败: {}", e)
+                "message": format!("Failed to save ZIP file: {}", e)
             }));
         }
 
@@ -670,13 +668,13 @@ impl VueFinder {
             None => return HttpResponse::BadRequest().finish(),
         };
 
-        // 读取 ZIP 文件
+        // Read ZIP file
         let zip_contents = match storage.read(&payload.item).await {
             Ok(contents) => contents,
             Err(e) => {
                 return HttpResponse::InternalServerError().json(json!({
                     "status": false,
-                    "message": format!("读取ZIP文件失败: {}", e)
+                    "message": format!("Failed to read ZIP file: {}", e)
                 }));
             }
         };
@@ -687,12 +685,12 @@ impl VueFinder {
             Err(e) => {
                 return HttpResponse::InternalServerError().json(json!({
                     "status": false,
-                    "message": format!("打开ZIP文件失败: {}", e)
+                    "message": format!("Failed to open ZIP file: {}", e)
                 }));
             }
         };
 
-        // 解压文件
+        // Extract files
         let extract_path = format!(
             "{}/{}",
             query.path.clone().unwrap_or_default(),
@@ -702,11 +700,11 @@ impl VueFinder {
                 .unwrap_or_default()
         );
 
-        // 创建解压目标目录
+        // Create extraction target directory
         if let Err(e) = storage.create_dir(&extract_path).await {
             return HttpResponse::InternalServerError().json(json!({
                 "status": false,
-                "message": format!("创建解压目录失败: {}", e)
+                "message": format!("Failed to create extraction directory: {}", e)
             }));
         }
 
@@ -716,7 +714,7 @@ impl VueFinder {
                 Err(e) => {
                     return HttpResponse::InternalServerError().json(json!({
                         "status": false,
-                        "message": format!("读取ZIP文件条目失败: {}", e)
+                        "message": format!("Failed to read ZIP file entry: {}", e)
                     }));
                 }
             };
@@ -724,39 +722,39 @@ impl VueFinder {
             let outpath = format!("{}/{}", extract_path, file.name());
 
             if file.name().ends_with('/') {
-                // 创建目录
+                // Create directory
                 if let Err(e) = storage.create_dir(&outpath).await {
                     return HttpResponse::InternalServerError().json(json!({
                         "status": false,
-                        "message": format!("创建目录失败: {}", e)
+                        "message": format!("Failed to create directory: {}", e)
                     }));
                 }
             } else {
-                // 确保父目录存在
+                // Ensure parent directory exists
                 if let Some(p) = Path::new(&outpath).parent() {
                     if let Some(parent_path) = p.to_str() {
                         if let Err(e) = storage.create_dir(parent_path).await {
                             return HttpResponse::InternalServerError().json(json!({
                                 "status": false,
-                                "message": format!("创建父目录失败: {}", e)
+                                "message": format!("Failed to create parent directory: {}", e)
                             }));
                         }
                     }
                 }
 
-                // 读取并写入文件内容
+                // Read and write file contents
                 let mut buffer = Vec::new();
                 if let Err(e) = std::io::copy(&mut file, &mut buffer) {
                     return HttpResponse::InternalServerError().json(json!({
                         "status": false,
-                        "message": format!("读取ZIP文件内容失败: {}", e)
+                        "message": format!("Failed to read ZIP file content: {}", e)
                     }));
                 }
 
                 if let Err(e) = storage.write(&outpath, buffer).await {
                     return HttpResponse::InternalServerError().json(json!({
                         "status": false,
-                        "message": format!("写入解压文件失败: {}", e)
+                        "message": format!("Failed to write extracted file: {}", e)
                     }));
                 }
             }
@@ -794,7 +792,7 @@ impl VueFinder {
     }
 }
 
-// 请求和响应结构体
+// Request and response structs
 #[derive(Deserialize)]
 pub struct FinderQuery {
     q: String,
@@ -851,16 +849,16 @@ pub struct FileItem {
     path: String,
 }
 
-// 主函数
+// Main function
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::init_from_env(Env::default().default_filter_or("info"));
 
-    // 确保 storage 目录存在
+    // Ensure storage directory exists
     let storage_path = "./storage";
     tokio::fs::create_dir_all(storage_path).await?;
 
-    let config = Config::from_file("config.json").unwrap_or_else(|_| Config {
+    let config = VueFinderConfig::from_file("config.json").unwrap_or_else(|_| VueFinderConfig {
         public_links: None,
         cors: default_cors_config(),
     });

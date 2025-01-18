@@ -1,47 +1,10 @@
+use super::{StorageAdapter, StorageError, StorageItem};
 use async_trait::async_trait;
 use mime_guess::from_path;
-use serde::Serialize;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::time::SystemTime;
-use thiserror::Error;
 use tokio::fs;
-
-#[derive(Error, Debug)]
-pub enum StorageError {
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("Path not found: {0}")]
-    NotFound(String),
-    #[error("Invalid path: {0}")]
-    InvalidPath(String),
-}
-
-#[async_trait]
-pub trait StorageAdapter {
-    async fn list_contents(
-        &self,
-        path: &str,
-    ) -> Result<Vec<StorageItem>, Box<dyn std::error::Error>>;
-    async fn read(&self, path: &str) -> Result<Vec<u8>, StorageError>;
-    async fn write(&self, path: &str, contents: Vec<u8>) -> Result<(), StorageError>;
-    async fn delete(&self, path: &str) -> Result<(), StorageError>;
-    async fn create_dir(&self, path: &str) -> Result<(), StorageError>;
-    async fn exists(&self, path: &str) -> Result<bool, StorageError>;
-}
-
-#[derive(Debug, Serialize)]
-pub struct StorageItem {
-    #[serde(rename = "type")]
-    pub node_type: String,
-    pub path: String,
-    pub basename: String,
-    pub extension: Option<String>,
-    pub mime_type: Option<String>,
-    pub last_modified: Option<u64>,
-    #[serde(rename = "file_size")]
-    pub size: Option<u64>,
-}
 
 const LOCAL_SCHEME: &str = "local://";
 
@@ -57,38 +20,79 @@ impl LocalStorage {
         }
     }
 
-    // 解析并验证路径
+    // Parse and validate path
     fn resolve_path(&self, path: &str) -> Result<PathBuf, StorageError> {
         let clean_path = path
             .trim_start_matches(LOCAL_SCHEME)
             .trim_start_matches('/');
-        let full_path = PathBuf::from(&self.root).join(clean_path);
-        // 安全检查：确保路径在 root 目录下
-        if !full_path.starts_with(&self.root) {
-            return Err(StorageError::InvalidPath(path.to_string()));
+
+        // Convert to absolute path and normalize
+        let full_path = PathBuf::from(&self.root)
+            .canonicalize()
+            .map_err(StorageError::Io)?
+            .join(clean_path);
+
+        // Try to canonicalize the full path if it exists
+        let canonical_path = if full_path.exists() {
+            full_path.canonicalize().map_err(StorageError::Io)?
+        } else {
+            // For non-existent paths, canonicalize the parent and then append the filename
+            let parent = full_path.parent().ok_or_else(|| {
+                StorageError::InvalidPath("Invalid path: no parent directory".to_string())
+            })?;
+            let filename = full_path.file_name().ok_or_else(|| {
+                StorageError::InvalidPath("Invalid path: no filename".to_string())
+            })?;
+            parent
+                .canonicalize()
+                .map_err(StorageError::Io)?
+                .join(filename)
+        };
+
+        // Get canonical root path
+        let root_path = PathBuf::from(&self.root)
+            .canonicalize()
+            .map_err(StorageError::Io)?;
+
+        // Security check: ensure path is under root directory
+        if !canonical_path.starts_with(&root_path) {
+            return Err(StorageError::InvalidPath(
+                "Path attempts to escape root directory".to_string(),
+            ));
         }
 
-        Ok(full_path)
+        Ok(canonical_path)
     }
 }
 
 #[async_trait]
 impl StorageAdapter for LocalStorage {
+    fn name(&self) -> String {
+        LOCAL_SCHEME.trim_end_matches("://").to_string()
+    }
+
     async fn list_contents(
         &self,
         path: &str,
     ) -> Result<Vec<StorageItem>, Box<dyn std::error::Error>> {
         let full_path = self.resolve_path(path)?;
-        println!("Full path: {:?}", full_path); // 打印 full_path
         let mut entries = Vec::new();
 
         let mut read_dir = fs::read_dir(&full_path).await?;
+
+        // Get canonical root path
+        let root_path = PathBuf::from(&self.root)
+            .canonicalize()
+            .map_err(StorageError::Io)?;
+
         while let Some(entry) = read_dir.next_entry().await? {
             let metadata = entry.metadata().await?;
             let path_buf = entry.path();
+
+            // Calculate relative path from root
             let relative_path = path_buf
-                .strip_prefix(&self.root)
-                .unwrap()
+                .strip_prefix(&root_path)
+                .unwrap_or(&path_buf)
                 .to_string_lossy()
                 .into_owned();
 
@@ -125,8 +129,6 @@ impl StorageAdapter for LocalStorage {
                 None
             };
 
-            println!("Last modified: {:?}", last_modified);
-
             entries.push(StorageItem {
                 node_type: if metadata.is_dir() {
                     "dir".to_string()
@@ -147,6 +149,7 @@ impl StorageAdapter for LocalStorage {
 
     async fn read(&self, path: &str) -> Result<Vec<u8>, StorageError> {
         let full_path = self.resolve_path(path)?;
+
         match fs::read(&full_path).await {
             Ok(contents) => Ok(contents),
             Err(e) if e.kind() == ErrorKind::NotFound => {
@@ -159,7 +162,7 @@ impl StorageAdapter for LocalStorage {
     async fn write(&self, path: &str, contents: Vec<u8>) -> Result<(), StorageError> {
         let full_path = self.resolve_path(path)?;
 
-        // 确保父目录存在
+        // Ensure parent directory exists
         if let Some(parent) = full_path.parent() {
             fs::create_dir_all(parent).await?;
         }
@@ -213,34 +216,34 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage = LocalStorage::new(temp_dir.path().to_str().unwrap());
 
-        // 测试创建目录
+        // Test create directory
         storage.create_dir("test_dir").await.unwrap();
         assert!(storage.exists("test_dir").await.unwrap());
 
-        // 测试写入文件
+        // Test write file
         storage
             .write("test_dir/test.txt", b"Hello".to_vec())
             .await
             .unwrap();
         assert!(storage.exists("test_dir/test.txt").await.unwrap());
 
-        // 测试读取文件
+        // Test read file
         let contents = storage.read("test_dir/test.txt").await.unwrap();
         assert_eq!(contents, b"Hello");
 
-        // 测试列出内容
+        // Test list contents
         let entries = storage.list_contents("test_dir").await.unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].path, "test_dir/test.txt");
+        assert_eq!(entries[0].path, "local://test_dir/test.txt");
         assert_eq!(entries[0].node_type, "file");
         assert_eq!(entries[0].extension.as_deref(), Some("txt"));
         assert_eq!(entries[0].mime_type.as_deref(), Some("text/plain"));
 
-        // 测试删除
+        // Test delete
         storage.delete("test_dir/test.txt").await.unwrap();
         assert!(!storage.exists("test_dir/test.txt").await.unwrap());
 
-        // 测试删除目录
+        // Test delete directory
         storage.delete("test_dir").await.unwrap();
         assert!(!storage.exists("test_dir").await.unwrap());
     }
@@ -250,11 +253,19 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage = LocalStorage::new(temp_dir.path().to_str().unwrap());
 
-        // 测试路径穿越攻击
+        // Test path traversal attack
         assert!(storage.read("../outside.txt").await.is_err());
+        assert!(storage.read("test/../../outside.txt").await.is_err());
         assert!(storage.write("../outside.txt", vec![]).await.is_err());
+        assert!(storage
+            .write("test/../../outside.txt", vec![])
+            .await
+            .is_err());
 
-        // 测试不存在的文件
+        // Test absolute path
+        assert!(storage.read("/etc/passwd").await.is_err());
+
+        // Test non-existent file
         assert!(matches!(
             storage.read("nonexistent.txt").await,
             Err(StorageError::NotFound(_))
