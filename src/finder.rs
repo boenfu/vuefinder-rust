@@ -42,6 +42,8 @@ struct FileNode {
     #[serde(flatten)]
     storage_item: StorageItem,
     url: Option<String>,
+    // search result supported
+    dir: Option<String>,
 }
 
 #[derive(Clone)]
@@ -120,6 +122,7 @@ impl VueFinder {
                 let mut node = FileNode {
                     storage_item: item,
                     url: None,
+                    dir: None,
                 };
                 data.set_public_links(&mut node);
                 node
@@ -231,26 +234,50 @@ impl VueFinder {
             None => return HttpResponse::BadRequest().finish(),
         };
 
-        match storage
-            .list_contents(&query.path.clone().unwrap_or_default())
-            .await
-        {
-            Ok(contents) => {
-                let filter = query.filter.clone().unwrap_or_default().to_lowercase();
-                let files: Vec<_> = contents
-                    .into_iter()
-                    .filter(|item| {
-                        item.node_type == "file" && item.basename.to_lowercase().contains(&filter)
-                    })
-                    .collect();
+        let base_path = query.path.clone().unwrap_or_default();
+        let filter = query.filter.clone().unwrap_or_default().to_lowercase();
 
-                HttpResponse::Ok().json(json!({
-                    "adapter": adapter,
-                    "storages": data.storages.keys().collect::<Vec<_>>(),
-                    "dirname": query.path,
-                    "files": files
-                }))
+        async fn search_dir(
+            storage: &Arc<dyn StorageAdapter>,
+            current_path: String,
+            filter: &str,
+            results: &mut Vec<FileNode>,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let contents = storage.list_contents(&current_path).await?;
+
+            for item in contents {
+                if item.node_type == "file" && item.basename.to_lowercase().contains(filter) {
+                    let dir = if let Some(parent) = Path::new(&item.path).parent() {
+                        parent.to_string_lossy().to_string()
+                    } else {
+                        String::new()
+                    };
+
+                    results.push(FileNode {
+                        storage_item: item,
+                        url: None,
+                        dir: Some(dir),
+                    });
+                } else if item.node_type == "dir" {
+                    let sub_path = if current_path.is_empty() {
+                        item.basename
+                    } else {
+                        format!("{}/{}", current_path, item.basename)
+                    };
+                    Box::pin(search_dir(storage, sub_path, filter, results)).await?;
+                }
             }
+            Ok(())
+        }
+
+        let mut files = Vec::new();
+        match search_dir(storage, base_path, &filter, &mut files).await {
+            Ok(_) => HttpResponse::Ok().json(json!({
+                "adapter": adapter,
+                "storages": data.storages.keys().collect::<Vec<_>>(),
+                "dirname": query.path,
+                "files": files
+            })),
             Err(e) => HttpResponse::InternalServerError().json(json!({
                 "status": false,
                 "message": e.to_string()
