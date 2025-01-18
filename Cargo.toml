@@ -1,12 +1,12 @@
 [package]
 name = "vuefinder"
-version = "0.1.0"
+version = "0.0.1"
 authors = ["boenfu"]
 description = "A Rust implementation of VueFinder file manager"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/boenfu/vuefinder"
-keywords = ["file-manager", "web", "vue"]
+keywords = ["file-manager", "web", "vue", "vuefinder"]
 categories = ["filesystem", "web-programming"]
 readme = "README.md"
 
@@ -55,4 +55,4 @@ env_logger = "0.10"
 
 [dev-dependencies]
 tokio-test = "0.4"
-tempfile = "3.8" 
+tempfile = "3.8"

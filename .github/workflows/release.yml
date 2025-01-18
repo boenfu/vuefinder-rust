@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*" # 仅在版本标签推送时触发
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          override-file: Cargo.toml
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Get commit messages
+        id: get_commit_messages
+        run: |
+          echo "COMMIT_MESSAGES<<EOF" >> $GITHUB_ENV
+          git log --format="- %s" ${GITHUB_REF}^..${GITHUB_REF} >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref }}
+          files: target/release/vuefinder # 替换为您的二进制文件路径
+          body: ${{ env.COMMIT_MESSAGES }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

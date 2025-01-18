@@ -21,7 +21,7 @@ cargo install vuefinder
 Add to your project's `Cargo.toml`:
 ```toml
 [dependencies]
-vuefinder = "0.1"
+vuefinder = "*"
 ```
 
 Or using cargo add:
@@ -142,4 +142,4 @@ Create a `config.json` file in your project root:
 
 ## License
 
-MIT
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
