@@ -1,6 +1,6 @@
 [package]
 name = "vuefinder"
-version = "0.0.1"
+version = "0.1.0"
 authors = ["boenfu"]
 description = "A Rust implementation of VueFinder file manager"
 edition = "2021"
