@@ -45,17 +45,33 @@ impl LocalStorage {
         let canonical_path = if full_path.exists() {
             full_path.canonicalize().map_err(StorageError::Io)?
         } else {
-            // For non-existent paths, canonicalize the parent and then append the filename
-            let parent = full_path.parent().ok_or_else(|| {
-                StorageError::InvalidPath("Invalid path: no parent directory".to_string())
-            })?;
-            let filename = full_path.file_name().ok_or_else(|| {
-                StorageError::InvalidPath("Invalid path: no filename".to_string())
-            })?;
-            parent
-                .canonicalize()
-                .map_err(StorageError::Io)?
-                .join(filename)
+            // For non-existent paths, walk up to find the nearest existing ancestor,
+            // canonicalize it, and append the remaining components.
+            let mut ancestor = full_path.as_path();
+            let mut remaining = Vec::new();
+            loop {
+                if ancestor.exists() {
+                    break;
+                }
+                remaining.push(
+                    ancestor
+                        .file_name()
+                        .ok_or_else(|| {
+                            StorageError::InvalidPath(
+                                "Invalid path: no parent directory".to_string(),
+                            )
+                        })?
+                        .to_owned(),
+                );
+                ancestor = ancestor.parent().ok_or_else(|| {
+                    StorageError::InvalidPath("Invalid path: no parent directory".to_string())
+                })?;
+            }
+            let mut result = ancestor.canonicalize().map_err(StorageError::Io)?;
+            for component in remaining.into_iter().rev() {
+                result = result.join(component);
+            }
+            result
         };
 
         // Get canonical root path
@@ -213,6 +229,24 @@ impl StorageAdapter for LocalStorage {
         let full_path = self.resolve_path(path)?;
         Ok(fs::try_exists(&full_path).await?)
     }
+
+    async fn rename(&self, old_path: &str, new_path: &str) -> Result<(), StorageError> {
+        let old_full_path = self.resolve_path(old_path)?;
+        let new_full_path = self.resolve_path(new_path)?;
+
+        // Ensure parent directory of new path exists
+        if let Some(parent) = new_full_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+
+        match fs::rename(&old_full_path, &new_full_path).await {
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                Err(StorageError::NotFound(old_path.to_string()))
+            }
+            Err(e) => Err(StorageError::Io(e)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -279,5 +313,48 @@ mod tests {
             storage.read("nonexistent.txt").await,
             Err(StorageError::NotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn test_rename_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = LocalStorage::new(temp_dir.path().to_str().unwrap());
+
+        // Create a file
+        storage.write("test.txt", b"Hello".to_vec()).await.unwrap();
+        assert!(storage.exists("test.txt").await.unwrap());
+
+        // Rename file
+        storage.rename("test.txt", "renamed.txt").await.unwrap();
+        assert!(!storage.exists("test.txt").await.unwrap());
+        assert!(storage.exists("renamed.txt").await.unwrap());
+
+        // Verify content
+        let contents = storage.read("renamed.txt").await.unwrap();
+        assert_eq!(contents, b"Hello");
+    }
+
+    #[tokio::test]
+    async fn test_rename_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = LocalStorage::new(temp_dir.path().to_str().unwrap());
+
+        // Create a directory with a file
+        storage.create_dir("test_dir").await.unwrap();
+        storage
+            .write("test_dir/file.txt", b"World".to_vec())
+            .await
+            .unwrap();
+        assert!(storage.exists("test_dir").await.unwrap());
+
+        // Rename directory
+        storage.rename("test_dir", "renamed_dir").await.unwrap();
+        assert!(!storage.exists("test_dir").await.unwrap());
+        assert!(storage.exists("renamed_dir").await.unwrap());
+        assert!(storage.exists("renamed_dir/file.txt").await.unwrap());
+
+        // Verify file content still accessible
+        let contents = storage.read("renamed_dir/file.txt").await.unwrap();
+        assert_eq!(contents, b"World");
     }
 }
