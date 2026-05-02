@@ -7,7 +7,7 @@ pub struct Query {
     pub path: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct BoolOrNum(pub bool);
 
 impl<'de> Deserialize<'de> for BoolOrNum {
@@ -39,12 +39,6 @@ impl<'de> Deserialize<'de> for BoolOrNum {
                 }
             }
         }
-    }
-}
-
-impl Default for BoolOrNum {
-    fn default() -> Self {
-        BoolOrNum(false)
     }
 }
 
@@ -85,7 +79,7 @@ pub struct RenameRequest {
 
 #[derive(Deserialize)]
 pub struct MoveRequest {
-    pub path: String,
+    pub path: Option<String>,
     #[serde(default)]
     pub items: Vec<FileItem>,
     #[serde(default)]
@@ -102,7 +96,7 @@ impl MoveRequest {
             .iter()
             .map(|s| FileItem {
                 path: s.clone(),
-                r#type: "file".to_string(),
+                r#type: String::new(),
             })
             .collect()
     }
@@ -110,7 +104,7 @@ impl MoveRequest {
 
 #[derive(Deserialize)]
 pub struct CopyRequest {
-    pub path: String,
+    pub path: Option<String>,
     #[serde(default)]
     pub items: Vec<FileItem>,
     #[serde(default)]
@@ -127,7 +121,7 @@ impl CopyRequest {
             .iter()
             .map(|s| FileItem {
                 path: s.clone(),
-                r#type: "file".to_string(),
+                r#type: String::new(),
             })
             .collect()
     }

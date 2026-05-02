@@ -13,11 +13,11 @@ use crate::payload::{
     ArchiveRequest, CopyRequest, DeleteRequest, MoveRequest, NewFileRequest, NewFolderRequest,
     Query, RenameRequest, SaveRequest, SearchQuery, UnarchiveRequest, UploadForm,
 };
-use crate::storages::StorageAdapter;
 use crate::storages::StorageItem;
+use crate::storages::{StorageAdapter, StorageError};
 
 // Default configuration functions
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct VueFinderConfig {
     pub public_links: Option<std::collections::HashMap<String, String>>,
 }
@@ -27,12 +27,6 @@ impl VueFinderConfig {
         let content = std::fs::read_to_string(path)?;
         let config: VueFinderConfig = serde_json::from_str(&content)?;
         Ok(config)
-    }
-}
-
-impl Default for VueFinderConfig {
-    fn default() -> Self {
-        Self { public_links: None }
     }
 }
 
@@ -74,6 +68,93 @@ impl VueFinder {
             }
         }
         None
+    }
+
+    fn join_storage_path(base: &str, child: &str) -> String {
+        if child.contains("://") {
+            return child.to_string();
+        }
+
+        if base.ends_with("://") || base.ends_with('/') {
+            format!("{base}{child}")
+        } else {
+            format!("{base}/{child}")
+        }
+    }
+
+    fn is_plain_name(name: &str) -> bool {
+        !name.is_empty()
+            && name != "."
+            && name != ".."
+            && !name.contains("://")
+            && !name.contains('/')
+            && !name.contains('\\')
+    }
+
+    fn storage_path_parts(path: &str) -> Option<(&str, &str)> {
+        path.find("://").map(|pos| (&path[..pos], &path[pos + 3..]))
+    }
+
+    fn normalized_storage_path_parts(path: &str) -> Option<(String, String)> {
+        let (storage, raw_path) = Self::storage_path_parts(path)?;
+        let mut parts = Vec::new();
+
+        for part in raw_path.split('/') {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    parts.pop()?;
+                }
+                _ => parts.push(part),
+            }
+        }
+
+        Some((storage.to_string(), parts.join("/")))
+    }
+
+    fn is_same_or_descendant_storage_path(parent: &str, candidate: &str) -> bool {
+        let Some((parent_storage, parent_path)) = Self::normalized_storage_path_parts(parent)
+        else {
+            return false;
+        };
+        let Some((candidate_storage, candidate_path)) =
+            Self::normalized_storage_path_parts(candidate)
+        else {
+            return false;
+        };
+
+        if parent_storage != candidate_storage {
+            return false;
+        }
+
+        parent_path.is_empty()
+            || candidate_path == parent_path
+            || candidate_path
+                .strip_prefix(&parent_path)
+                .is_some_and(|rest| rest.starts_with('/'))
+    }
+
+    fn storage_path_basename(path: &str) -> Option<String> {
+        let (_, path) = Self::normalized_storage_path_parts(path)?;
+        path.rsplit('/')
+            .find(|part| !part.is_empty())
+            .map(ToString::to_string)
+    }
+
+    fn transfer_target_path(destination: &str, source_path: &str) -> Option<String> {
+        let basename = Self::storage_path_basename(source_path)?;
+        Some(Self::join_storage_path(destination, &basename))
+    }
+
+    async fn is_dir_item(
+        storage: &Arc<dyn StorageAdapter>,
+        item: &crate::payload::FileItem,
+    ) -> Result<bool, StorageError> {
+        match item.r#type.as_str() {
+            "dir" => Ok(true),
+            "file" => Ok(false),
+            _ => storage.is_dir(&item.path).await,
+        }
     }
 
     fn set_public_links(&self, node: &mut FileNode) {
@@ -281,10 +362,10 @@ impl VueFinder {
         let deep = query.deep.as_ref().map(|b| b.0).unwrap_or(false);
 
         let size_filter = match query.size.as_deref() {
-            Some("small") => Some(0..1024),           // < 1KB
-            Some("medium") => Some(1024..1024*1024),  // 1KB - 1MB
-            Some("large") => Some(1024*1024..usize::MAX), // >= 1MB
-            _ => None,                                 // "all" or None
+            Some("small") => Some(0..1024),                 // < 1KB
+            Some("medium") => Some(1024..1024 * 1024),      // 1KB - 1MB
+            Some("large") => Some(1024 * 1024..usize::MAX), // >= 1MB
+            _ => None,                                      // "all" or None
         };
 
         fn matches_size(size: Option<u64>, filter: &Option<std::ops::Range<usize>>) -> bool {
@@ -326,7 +407,15 @@ impl VueFinder {
                     } else {
                         format!("{current_path}/{}", item.basename)
                     };
-                    Box::pin(search_dir(storage, sub_path, filter, deep, size_filter, results)).await?;
+                    Box::pin(search_dir(
+                        storage,
+                        sub_path,
+                        filter,
+                        deep,
+                        size_filter,
+                        results,
+                    ))
+                    .await?;
                 }
             }
             Ok(())
@@ -465,10 +554,18 @@ impl VueFinder {
             }
         };
 
-        let new_path = format!("{}/{}", payload.path, payload.name);
+        if !Self::is_plain_name(&payload.name) {
+            return HttpResponse::BadRequest().json(json!({
+                "status": false,
+                "message": "Invalid new name."
+            }));
+        }
+
+        let old_path = Self::join_storage_path(&payload.path, &payload.item);
+        let new_path = Self::join_storage_path(&payload.path, &payload.name);
 
         // Use storage rename which handles both files and directories
-        match storage.rename(&payload.item, &new_path).await {
+        match storage.rename(&old_path, &new_path).await {
             Ok(_) => {
                 let query = web::Query(Query {
                     path: payload.path.clone(),
@@ -494,7 +591,13 @@ impl VueFinder {
             let item_source = format!("{}/{}", source_path, item.basename);
             let item_dest = format!("{}/{}", dest_path, item.basename);
             if item.node_type == "dir" {
-                Box::pin(Self::copy_dir_recursive(source_storage, dest_storage, &item_source, &item_dest)).await?;
+                Box::pin(Self::copy_dir_recursive(
+                    source_storage,
+                    dest_storage,
+                    &item_source,
+                    &item_dest,
+                ))
+                .await?;
             } else {
                 let contents = source_storage.read(&item_source).await?;
                 dest_storage.write(&item_dest, contents).await?;
@@ -530,15 +633,15 @@ impl VueFinder {
         // Check if the target path conflicts with existing files
         let items = payload.resolve_items();
         for item in &items {
-            let target = format!(
-                "{}/{}",
-                payload.destination,
-                Path::new(&item.path)
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_str()
-                    .unwrap()
-            );
+            let target = match Self::transfer_target_path(&payload.destination, &item.path) {
+                Some(target) => target,
+                None => {
+                    return HttpResponse::BadRequest().json(json!({
+                        "status": false,
+                        "message": "Invalid source path format."
+                    }))
+                }
+            };
             if storage.exists(&target).await.unwrap_or(false) {
                 return HttpResponse::BadRequest().json(json!({
                     "status": false,
@@ -568,18 +671,39 @@ impl VueFinder {
                 }
             };
 
-            let target = format!(
-                "{}/{}",
-                payload.destination,
-                Path::new(&item.path)
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_str()
-                    .unwrap()
-            );
+            let target = match Self::transfer_target_path(&payload.destination, &item.path) {
+                Some(target) => target,
+                None => {
+                    return HttpResponse::BadRequest().json(json!({
+                        "status": false,
+                        "message": "Invalid source path format."
+                    }))
+                }
+            };
 
-            if item.r#type == "dir" {
-                if let Err(e) = Self::copy_dir_recursive(source_storage, storage, &item.path, &target).await {
+            let item_is_dir = match Self::is_dir_item(source_storage, item).await {
+                Ok(is_dir) => is_dir,
+                Err(e) => {
+                    return HttpResponse::InternalServerError().json(json!({
+                        "status": false,
+                        "message": e.to_string()
+                    }))
+                }
+            };
+
+            if item_is_dir {
+                if source_storage_name == storage_name
+                    && Self::is_same_or_descendant_storage_path(&item.path, &payload.destination)
+                {
+                    return HttpResponse::BadRequest().json(json!({
+                        "status": false,
+                        "message": "Cannot move a directory into itself."
+                    }));
+                }
+
+                if let Err(e) =
+                    Self::copy_dir_recursive(source_storage, storage, &item.path, &target).await
+                {
                     return HttpResponse::InternalServerError().json(json!({
                         "status": false,
                         "message": format!("Failed to move directory: {}", e)
@@ -618,15 +742,12 @@ impl VueFinder {
         }
 
         let query = web::Query(Query {
-            path: payload.path.clone(),
+            path: payload.destination.clone(),
         });
         Self::index(data, query).await
     }
 
-    pub async fn copy(
-        data: web::Data<VueFinder>,
-        payload: web::Json<CopyRequest>,
-    ) -> HttpResponse {
+    pub async fn copy(data: web::Data<VueFinder>, payload: web::Json<CopyRequest>) -> HttpResponse {
         let storage_name = match data.parse_storage_name_from_path(&payload.destination) {
             Some(name) => name,
             None => {
@@ -650,15 +771,15 @@ impl VueFinder {
         // Check if the target path conflicts with existing files
         let items = payload.resolve_items();
         for item in &items {
-            let target = format!(
-                "{}/{}",
-                payload.destination,
-                Path::new(&item.path)
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_str()
-                    .unwrap()
-            );
+            let target = match Self::transfer_target_path(&payload.destination, &item.path) {
+                Some(target) => target,
+                None => {
+                    return HttpResponse::BadRequest().json(json!({
+                        "status": false,
+                        "message": "Invalid source path format."
+                    }))
+                }
+            };
             if storage.exists(&target).await.unwrap_or(false) {
                 return HttpResponse::BadRequest().json(json!({
                     "status": false,
@@ -688,18 +809,39 @@ impl VueFinder {
                 }
             };
 
-            let target = format!(
-                "{}/{}",
-                payload.destination,
-                Path::new(&item.path)
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_str()
-                    .unwrap()
-            );
+            let target = match Self::transfer_target_path(&payload.destination, &item.path) {
+                Some(target) => target,
+                None => {
+                    return HttpResponse::BadRequest().json(json!({
+                        "status": false,
+                        "message": "Invalid source path format."
+                    }))
+                }
+            };
 
-            if item.r#type == "dir" {
-                if let Err(e) = Self::copy_dir_recursive(source_storage, storage, &item.path, &target).await {
+            let item_is_dir = match Self::is_dir_item(source_storage, item).await {
+                Ok(is_dir) => is_dir,
+                Err(e) => {
+                    return HttpResponse::InternalServerError().json(json!({
+                        "status": false,
+                        "message": e.to_string()
+                    }))
+                }
+            };
+
+            if item_is_dir {
+                if source_storage_name == storage_name
+                    && Self::is_same_or_descendant_storage_path(&item.path, &payload.destination)
+                {
+                    return HttpResponse::BadRequest().json(json!({
+                        "status": false,
+                        "message": "Cannot copy a directory into itself."
+                    }));
+                }
+
+                if let Err(e) =
+                    Self::copy_dir_recursive(source_storage, storage, &item.path, &target).await
+                {
                     return HttpResponse::InternalServerError().json(json!({
                         "status": false,
                         "message": format!("Failed to copy directory: {}", e)
@@ -726,7 +868,7 @@ impl VueFinder {
         }
 
         let query = web::Query(Query {
-            path: payload.path.clone(),
+            path: payload.destination.clone(),
         });
         Self::index(data, query).await
     }
@@ -776,7 +918,7 @@ impl VueFinder {
     ) -> HttpResponse {
         let path = payload.path.to_string();
         let filename = payload.name.to_string();
-        
+
         if path.is_empty() {
             return HttpResponse::BadRequest().json(json!({
                 "status": false,
@@ -832,9 +974,7 @@ impl VueFinder {
             }));
         }
 
-        let query = web::Query(Query {
-            path: path.clone(),
-        });
+        let query = web::Query(Query { path: path.clone() });
         Self::index(data, query).await
     }
 
@@ -862,7 +1002,19 @@ impl VueFinder {
             }
         };
 
-        let zip_path = format!("{}/{}.zip", payload.path, payload.name);
+        if !Self::is_plain_name(&payload.name) {
+            return HttpResponse::BadRequest().json(json!({
+                "status": false,
+                "message": "Invalid archive name."
+            }));
+        }
+
+        let archive_name = if payload.name.ends_with(".zip") {
+            payload.name.clone()
+        } else {
+            format!("{}.zip", payload.name)
+        };
+        let zip_path = Self::join_storage_path(&payload.path, &archive_name);
 
         // Check if file already exists
         if storage.exists(&zip_path).await.unwrap_or(false) {
@@ -887,13 +1039,20 @@ impl VueFinder {
                 } else {
                     format!("{zip_path}/{}", item.basename)
                 };
-                
+
                 if item.node_type == "dir" {
-                    zip.add_directory(&item_zip_path, options.clone())?;
-                    Box::pin(add_dir_to_zip(storage, zip, &item_storage_path, &item_zip_path, options.clone())).await?;
+                    zip.add_directory(&item_zip_path, options)?;
+                    Box::pin(add_dir_to_zip(
+                        storage,
+                        zip,
+                        &item_storage_path,
+                        &item_zip_path,
+                        options,
+                    ))
+                    .await?;
                 } else {
                     let contents = storage.read(&item_storage_path).await?;
-                    zip.start_file(&item_zip_path, options.clone())?;
+                    zip.start_file(&item_zip_path, options)?;
                     zip.write_all(&contents)?;
                 }
             }
@@ -901,7 +1060,13 @@ impl VueFinder {
         }
 
         // Create ZIP file in temp file to avoid borrow issues
-        let temp_path = std::env::temp_dir().join(format!("vuefinder_archive_{}.zip", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let temp_path = std::env::temp_dir().join(format!(
+            "vuefinder_archive_{}.zip",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let file = match std::fs::File::create(&temp_path) {
             Ok(f) => f,
             Err(e) => {
@@ -924,15 +1089,19 @@ impl VueFinder {
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or_default();
-                
-                if let Err(e) = zip.add_directory(dir_name, options.clone()) {
+
+                if let Err(e) = zip.add_directory(dir_name, options) {
                     let _ = std::fs::remove_file(&temp_path);
                     return HttpResponse::InternalServerError().json(json!({
                         "status": false,
                         "message": format!("Failed to add directory to ZIP: {}", e)
                     }));
                 }
-                if let Err(e) = Box::pin(add_dir_to_zip(storage, &mut zip, &item.path, dir_name, options.clone())).await {
+                if let Err(e) = Box::pin(add_dir_to_zip(
+                    storage, &mut zip, &item.path, dir_name, options,
+                ))
+                .await
+                {
                     let _ = std::fs::remove_file(&temp_path);
                     return HttpResponse::InternalServerError().json(json!({
                         "status": false,
@@ -947,7 +1116,7 @@ impl VueFinder {
                             .and_then(|n| n.to_str())
                             .unwrap_or_default();
 
-                        if let Err(e) = zip.start_file(file_name, options.clone()) {
+                        if let Err(e) = zip.start_file(file_name, options) {
                             let _ = std::fs::remove_file(&temp_path);
                             return HttpResponse::InternalServerError().json(json!({
                                 "status": false,
@@ -1054,14 +1223,7 @@ impl VueFinder {
         };
 
         // Extract files
-        let extract_path = format!(
-            "{}/{}",
-            payload.path,
-            Path::new(&payload.item)
-                .file_stem()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default()
-        );
+        let extract_path = payload.path.clone();
 
         // Create extraction target directory
         if let Err(e) = storage.create_dir(&extract_path).await {
@@ -1082,7 +1244,22 @@ impl VueFinder {
                 }
             };
 
-            let outpath = format!("{}/{}", extract_path, file.name());
+            let enclosed_name = match file.enclosed_name() {
+                Some(path) if !path.as_os_str().is_empty() => path.to_string_lossy().to_string(),
+                _ => {
+                    return HttpResponse::BadRequest().json(json!({
+                        "status": false,
+                        "message": "Invalid ZIP entry path."
+                    }));
+                }
+            };
+            if enclosed_name.contains("://") {
+                return HttpResponse::BadRequest().json(json!({
+                    "status": false,
+                    "message": "Invalid ZIP entry path."
+                }));
+            }
+            let outpath = Self::join_storage_path(&extract_path, &enclosed_name);
 
             if file.name().ends_with('/') {
                 // Create directory
@@ -1129,10 +1306,7 @@ impl VueFinder {
         Self::index(data, query).await
     }
 
-    pub async fn save(
-        data: web::Data<VueFinder>,
-        payload: web::Json<SaveRequest>,
-    ) -> HttpResponse {
+    pub async fn save(data: web::Data<VueFinder>, payload: web::Json<SaveRequest>) -> HttpResponse {
         let storage_name = match data.parse_storage_name_from_path(&payload.path) {
             Some(name) => name,
             None => {
@@ -1168,5 +1342,410 @@ impl VueFinder {
                 "message": e.to_string()
             })),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::body::to_bytes;
+    use actix_web::http::StatusCode;
+    use tempfile::TempDir;
+
+    use crate::payload::{CopyRequest, MoveRequest};
+    use crate::storages::local::LocalStorage;
+
+    fn finder_for(root: &TempDir) -> web::Data<VueFinder> {
+        web::Data::new(VueFinder {
+            storages: LocalStorage::setup(root.path().to_str().unwrap()),
+            config: Arc::new(VueFinderConfig::default()),
+        })
+    }
+
+    fn assert_ok(response: &HttpResponse) {
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    fn assert_bad_request(response: &HttpResponse) {
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    async fn response_json(response: HttpResponse) -> serde_json::Value {
+        let body = to_bytes(response.into_body()).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn rename_uses_current_path_for_relative_item() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir(root.path().join("documents")).unwrap();
+        std::fs::write(root.path().join("documents/old-name.txt"), b"hello").unwrap();
+
+        let response = VueFinder::rename(
+            finder_for(&root),
+            web::Json(RenameRequest {
+                path: "local://documents".to_string(),
+                item: "old-name.txt".to_string(),
+                name: "new-name.txt".to_string(),
+            }),
+        )
+        .await;
+
+        assert_ok(&response);
+        assert!(!root.path().join("documents/old-name.txt").exists());
+        assert_eq!(
+            std::fs::read(root.path().join("documents/new-name.txt")).unwrap(),
+            b"hello"
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_rejects_path_like_new_name() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir_all(root.path().join("documents")).unwrap();
+        std::fs::create_dir_all(root.path().join("other")).unwrap();
+        std::fs::write(root.path().join("documents/file.txt"), b"hello").unwrap();
+
+        let response = VueFinder::rename(
+            finder_for(&root),
+            web::Json(RenameRequest {
+                path: "local://documents".to_string(),
+                item: "file.txt".to_string(),
+                name: "local://other/new.txt".to_string(),
+            }),
+        )
+        .await;
+
+        assert_bad_request(&response);
+        assert!(root.path().join("documents/file.txt").exists());
+        assert!(!root.path().join("other/new.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn copy_accepts_transfer_params_and_detects_directory_sources() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir_all(root.path().join("documents/subdir")).unwrap();
+        std::fs::write(root.path().join("documents/subdir/file.txt"), b"nested").unwrap();
+
+        let payload: CopyRequest = serde_json::from_value(json!({
+            "sources": ["local://documents/subdir"],
+            "destination": "local://backup"
+        }))
+        .unwrap();
+
+        let response = VueFinder::copy(finder_for(&root), web::Json(payload)).await;
+
+        assert_ok(&response);
+        assert_eq!(
+            std::fs::read(root.path().join("backup/subdir/file.txt")).unwrap(),
+            b"nested"
+        );
+        assert!(root.path().join("documents/subdir/file.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn move_accepts_transfer_params_and_detects_directory_sources() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir_all(root.path().join("documents/subdir")).unwrap();
+        std::fs::write(root.path().join("documents/subdir/file.txt"), b"nested").unwrap();
+
+        let payload: MoveRequest = serde_json::from_value(json!({
+            "sources": ["local://documents/subdir"],
+            "destination": "local://backup"
+        }))
+        .unwrap();
+
+        let response = VueFinder::r#move(finder_for(&root), web::Json(payload)).await;
+
+        assert_ok(&response);
+        assert_eq!(
+            std::fs::read(root.path().join("backup/subdir/file.txt")).unwrap(),
+            b"nested"
+        );
+        assert!(!root.path().join("documents/subdir").exists());
+    }
+
+    #[tokio::test]
+    async fn copy_uses_normalized_source_basename_for_target() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir_all(root.path().join("documents/subdir")).unwrap();
+        std::fs::write(root.path().join("documents/file.txt"), b"hello").unwrap();
+
+        let payload: CopyRequest = serde_json::from_value(json!({
+            "sources": ["local://documents/subdir/.."],
+            "destination": "local://backup"
+        }))
+        .unwrap();
+
+        let response = VueFinder::copy(finder_for(&root), web::Json(payload)).await;
+
+        assert_ok(&response);
+        assert_eq!(
+            std::fs::read(root.path().join("backup/documents/file.txt")).unwrap(),
+            b"hello"
+        );
+        assert!(!root.path().join("backup/file.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn move_uses_normalized_source_basename_for_target() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir_all(root.path().join("documents/subdir")).unwrap();
+        std::fs::write(root.path().join("documents/file.txt"), b"hello").unwrap();
+
+        let payload: MoveRequest = serde_json::from_value(json!({
+            "sources": ["local://documents/subdir/.."],
+            "destination": "local://backup"
+        }))
+        .unwrap();
+
+        let response = VueFinder::r#move(finder_for(&root), web::Json(payload)).await;
+
+        assert_ok(&response);
+        assert_eq!(
+            std::fs::read(root.path().join("backup/documents/file.txt")).unwrap(),
+            b"hello"
+        );
+        assert!(!root.path().join("backup/file.txt").exists());
+        assert!(!root.path().join("documents").exists());
+    }
+
+    #[tokio::test]
+    async fn copy_rejects_directory_into_own_descendant() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir_all(root.path().join("documents/subdir")).unwrap();
+        std::fs::write(root.path().join("documents/file.txt"), b"hello").unwrap();
+
+        let payload: CopyRequest = serde_json::from_value(json!({
+            "sources": ["local://documents"],
+            "destination": "local://documents/subdir"
+        }))
+        .unwrap();
+
+        let response = VueFinder::copy(finder_for(&root), web::Json(payload)).await;
+
+        assert_bad_request(&response);
+        assert!(!root.path().join("documents/subdir/documents").exists());
+    }
+
+    #[tokio::test]
+    async fn copy_rejects_directory_into_own_descendant_with_dot_component() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir_all(root.path().join("documents/subdir")).unwrap();
+        std::fs::write(root.path().join("documents/file.txt"), b"hello").unwrap();
+
+        let payload: CopyRequest = serde_json::from_value(json!({
+            "sources": ["local://documents"],
+            "destination": "local://./documents/subdir"
+        }))
+        .unwrap();
+
+        let response = VueFinder::copy(finder_for(&root), web::Json(payload)).await;
+
+        assert_bad_request(&response);
+        assert!(!root.path().join("documents/subdir/documents").exists());
+    }
+
+    #[tokio::test]
+    async fn move_rejects_directory_into_own_descendant() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir_all(root.path().join("documents/subdir")).unwrap();
+        std::fs::write(root.path().join("documents/file.txt"), b"hello").unwrap();
+
+        let payload: MoveRequest = serde_json::from_value(json!({
+            "sources": ["local://documents"],
+            "destination": "local://documents/subdir"
+        }))
+        .unwrap();
+
+        let response = VueFinder::r#move(finder_for(&root), web::Json(payload)).await;
+
+        assert_bad_request(&response);
+        assert!(root.path().join("documents/file.txt").exists());
+        assert!(!root.path().join("documents/subdir/documents").exists());
+    }
+
+    #[tokio::test]
+    async fn move_rejects_directory_into_own_descendant_with_parent_component() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir_all(root.path().join("documents/subdir")).unwrap();
+        std::fs::write(root.path().join("documents/file.txt"), b"hello").unwrap();
+
+        let payload: MoveRequest = serde_json::from_value(json!({
+            "sources": ["local://documents"],
+            "destination": "local://documents/../documents/subdir"
+        }))
+        .unwrap();
+
+        let response = VueFinder::r#move(finder_for(&root), web::Json(payload)).await;
+
+        assert_bad_request(&response);
+        assert!(root.path().join("documents/file.txt").exists());
+        assert!(!root.path().join("documents/subdir/documents").exists());
+    }
+
+    #[tokio::test]
+    async fn copy_returns_destination_listing_when_path_is_present() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir(root.path().join("documents")).unwrap();
+        std::fs::write(root.path().join("documents/file.txt"), b"hello").unwrap();
+
+        let payload: CopyRequest = serde_json::from_value(json!({
+            "path": "local://documents",
+            "sources": ["local://documents/file.txt"],
+            "destination": "local://backup"
+        }))
+        .unwrap();
+
+        let response = VueFinder::copy(finder_for(&root), web::Json(payload)).await;
+
+        assert_ok(&response);
+        let body = response_json(response).await;
+        assert_eq!(body["dirname"], "local://backup");
+    }
+
+    #[tokio::test]
+    async fn move_returns_destination_listing_when_path_is_present() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir(root.path().join("documents")).unwrap();
+        std::fs::write(root.path().join("documents/file.txt"), b"hello").unwrap();
+
+        let payload: MoveRequest = serde_json::from_value(json!({
+            "path": "local://documents",
+            "sources": ["local://documents/file.txt"],
+            "destination": "local://backup"
+        }))
+        .unwrap();
+
+        let response = VueFinder::r#move(finder_for(&root), web::Json(payload)).await;
+
+        assert_ok(&response);
+        let body = response_json(response).await;
+        assert_eq!(body["dirname"], "local://backup");
+    }
+
+    #[tokio::test]
+    async fn archive_keeps_existing_zip_extension() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir(root.path().join("documents")).unwrap();
+        std::fs::write(root.path().join("documents/file.txt"), b"hello").unwrap();
+
+        let response = VueFinder::archive(
+            finder_for(&root),
+            web::Json(ArchiveRequest {
+                path: "local://documents".to_string(),
+                name: "bundle.zip".to_string(),
+                items: vec![crate::payload::FileItem {
+                    path: "local://documents/file.txt".to_string(),
+                    r#type: "file".to_string(),
+                }],
+            }),
+        )
+        .await;
+
+        assert_ok(&response);
+        assert!(root.path().join("documents/bundle.zip").exists());
+        assert!(!root.path().join("documents/bundle.zip.zip").exists());
+    }
+
+    #[tokio::test]
+    async fn archive_rejects_path_like_name() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir(root.path().join("documents")).unwrap();
+        std::fs::create_dir(root.path().join("other")).unwrap();
+        std::fs::write(root.path().join("documents/file.txt"), b"hello").unwrap();
+
+        let response = VueFinder::archive(
+            finder_for(&root),
+            web::Json(ArchiveRequest {
+                path: "local://documents".to_string(),
+                name: "local://other/evil.zip".to_string(),
+                items: vec![crate::payload::FileItem {
+                    path: "local://documents/file.txt".to_string(),
+                    r#type: "file".to_string(),
+                }],
+            }),
+        )
+        .await;
+
+        assert_bad_request(&response);
+        assert!(!root.path().join("other/evil.zip").exists());
+    }
+
+    #[tokio::test]
+    async fn unarchive_extracts_into_requested_path() {
+        let root = TempDir::new().unwrap();
+        let archive_path = root.path().join("source.zip");
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        zip.start_file("file.txt", FileOptions::default()).unwrap();
+        zip.write_all(b"hello").unwrap();
+        zip.finish().unwrap();
+
+        let response = VueFinder::unarchive(
+            finder_for(&root),
+            web::Json(UnarchiveRequest {
+                item: "local://source.zip".to_string(),
+                path: "local://extracted".to_string(),
+            }),
+        )
+        .await;
+
+        assert_ok(&response);
+        assert_eq!(
+            std::fs::read(root.path().join("extracted/file.txt")).unwrap(),
+            b"hello"
+        );
+        assert!(!root.path().join("extracted/source/file.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn unarchive_rejects_entries_that_escape_requested_path() {
+        let root = TempDir::new().unwrap();
+        let archive_path = root.path().join("evil.zip");
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        zip.start_file("../evil.txt", FileOptions::default())
+            .unwrap();
+        zip.write_all(b"escape").unwrap();
+        zip.finish().unwrap();
+
+        let response = VueFinder::unarchive(
+            finder_for(&root),
+            web::Json(UnarchiveRequest {
+                item: "local://evil.zip".to_string(),
+                path: "local://extracted".to_string(),
+            }),
+        )
+        .await;
+
+        assert_bad_request(&response);
+        assert!(!root.path().join("evil.txt").exists());
+        assert!(!root.path().join("extracted/evil.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn unarchive_rejects_entries_with_storage_scheme() {
+        let root = TempDir::new().unwrap();
+        let archive_path = root.path().join("evil.zip");
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        zip.start_file("local://evil.txt", FileOptions::default())
+            .unwrap();
+        zip.write_all(b"escape").unwrap();
+        zip.finish().unwrap();
+
+        let response = VueFinder::unarchive(
+            finder_for(&root),
+            web::Json(UnarchiveRequest {
+                item: "local://evil.zip".to_string(),
+                path: "local://extracted".to_string(),
+            }),
+        )
+        .await;
+
+        assert_bad_request(&response);
+        assert!(!root.path().join("evil.txt").exists());
+        assert!(!root.path().join("extracted/local:/evil.txt").exists());
     }
 }

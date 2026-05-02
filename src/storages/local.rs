@@ -230,6 +230,17 @@ impl StorageAdapter for LocalStorage {
         Ok(fs::try_exists(&full_path).await?)
     }
 
+    async fn is_dir(&self, path: &str) -> Result<bool, StorageError> {
+        let full_path = self.resolve_path(path)?;
+        match fs::metadata(&full_path).await {
+            Ok(metadata) => Ok(metadata.is_dir()),
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                Err(StorageError::NotFound(path.to_string()))
+            }
+            Err(e) => Err(StorageError::Io(e)),
+        }
+    }
+
     async fn rename(&self, old_path: &str, new_path: &str) -> Result<(), StorageError> {
         let old_full_path = self.resolve_path(old_path)?;
         let new_full_path = self.resolve_path(new_path)?;

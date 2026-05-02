@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use crate::finder::{VueFinder, VueFinderConfig};
 use crate::router::{
-    archive_handler, copy_handler, delete_handler, download_handler, index_handler,
-    move_handler, new_file_handler, new_folder_handler, preview_handler, rename_handler,
-    save_handler, search_handler, unarchive_handler, upload_handler,
+    archive_handler, copy_handler, delete_handler, download_handler, index_handler, move_handler,
+    new_file_handler, new_folder_handler, preview_handler, rename_handler, save_handler,
+    search_handler, unarchive_handler, upload_handler,
 };
 use crate::storages::StorageAdapter;
 
